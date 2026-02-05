@@ -6,3 +6,4 @@
 # Project
 
 This project is a shell that prioritizes POSIX compatibility.
+This project uses Rust.

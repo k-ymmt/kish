@@ -1,7 +1,7 @@
 //! POSIX-oriented lexer module.
 //!
-//! This is a Phase 0 scaffold: public contracts are stable, while token
-//! recognition semantics are intentionally minimal.
+//! Phase 1 provides a stable token and metadata model while token-recognition
+//! behavior remains intentionally minimal.
 
 pub mod diagnostics;
 pub mod span;
@@ -20,12 +20,14 @@ use crate::lexer::cursor::Cursor;
 pub use diagnostics::{DiagnosticCode, FatalLexError, LexDiagnostic, RecoverableLexError};
 pub use span::{ByteOffset, SourceId, Span};
 pub use token::{
-    BoundaryResult, CompleteCommandTokens, LexStep, NeedMoreInput, NeedMoreReason, Token, TokenKind,
+    BoundaryResult, CompleteCommandTokens, LexStep, NeedMoreInput, NeedMoreReason, OperatorKind,
+    QuoteMarker, QuoteProvenance, SubstitutionKind, SubstitutionMarker, Token, TokenKind,
+    TokenOffset, TokenRange,
 };
 
 /// Lexer mode used to control tokenization state.
 ///
-/// In Phase 0 these modes are state markers only.
+/// In Phase 1 these modes are state markers only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LexerMode {
     /// Ordinary token recognition mode.
@@ -36,7 +38,7 @@ pub enum LexerMode {
     HereDocBody,
 }
 
-/// A POSIX-first lexer with Phase 0 placeholder behavior.
+/// A POSIX-first lexer with placeholder scanning behavior.
 ///
 /// The implementation is intentionally simple and deterministic:
 /// - returns raw word tokens split on ASCII whitespace
@@ -67,7 +69,7 @@ impl<'a> Lexer<'a> {
 
     /// Scans and returns the next lexical step.
     ///
-    /// Phase 0 behavior:
+    /// Phase 1 behavior:
     /// - returns [`LexStep::EndOfInput`] once all input is consumed
     /// - emits one [`TokenKind::Newline`] per `\n`
     /// - emits one [`TokenKind::Token`] for contiguous non-whitespace bytes
@@ -111,7 +113,7 @@ impl<'a> Lexer<'a> {
 
     /// Tokenizes up to the current complete-command boundary.
     ///
-    /// Phase 0 behavior:
+    /// Phase 1 behavior:
     /// - returns [`BoundaryResult::NeedMoreInput`] for explicit placeholder
     ///   incomplete patterns
     /// - otherwise tokenizes until newline or end of input and returns

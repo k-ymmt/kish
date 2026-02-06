@@ -1,0 +1,2 @@
+0	Token	\'a\'\"b\"$\'c\'	SingleQuoted@0..3;DoubleQuoted@3..6;DollarSingleQuoted@6..10	-
+1	Newline	\n	-	-

@@ -1,0 +1,9 @@
+0	Token	echo	-	-
+1	Token	a	-	-
+2	Operator(Pipe)	|	-	-
+3	Token	b	-	-
+4	Operator(AndIf)	&&	-	-
+5	Token	c	-	-
+6	Operator(Semicolon)	;	-	-
+7	Token	d	-	-
+8	Newline	\n	-	-

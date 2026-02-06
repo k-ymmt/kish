@@ -1,0 +1,2 @@
+0	Token	x$(echo ${a} $((1+2)))y	-	CommandSubstitution@1..22;ParameterExpansion@8..12;ArithmeticExpansion@13..21
+1	Newline	\n	-	-

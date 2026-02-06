@@ -1,0 +1,8 @@
+0	Token	cat	-	-
+1	Operator(HereDoc)	<<	-	-
+2	Token	A	-	-
+3	Operator(HereDocStripTabs)	<<-	-	-
+4	Token	B	-	-
+5	Newline	\n	-	-
+6	Token	ok	-	-
+7	Newline	\n	-	-

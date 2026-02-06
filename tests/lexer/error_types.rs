@@ -23,5 +23,10 @@ fn recoverable_and_fatal_errors_are_distinct_types() {
         FatalLexError::InternalInvariant(inner) => {
             assert_eq!(inner.code, DiagnosticCode::InternalInvariant)
         }
+        FatalLexError::UnterminatedSingleQuote(_)
+        | FatalLexError::UnterminatedDoubleQuote(_)
+        | FatalLexError::UnterminatedDollarSingleQuote(_) => {
+            panic!("unexpected fatal variant")
+        }
     }
 }

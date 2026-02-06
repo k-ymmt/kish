@@ -361,10 +361,12 @@ impl CompleteCommandTokens {
 pub enum NeedMoreReason {
     /// Line continuation marker with no following line.
     TrailingBackslash,
-    /// Odd number of `'` in the remaining input (Phase 0 heuristic).
+    /// Unterminated single quote in remaining input.
     UnterminatedSingleQuote,
-    /// Odd number of `"` in the remaining input (Phase 0 heuristic).
+    /// Unterminated double quote in remaining input.
     UnterminatedDoubleQuote,
+    /// Unterminated dollar-single quote in remaining input.
+    UnterminatedDollarSingleQuote,
     /// Incomplete state propagated from recoverable lexer diagnostics.
     Recoverable(RecoverableLexError),
 }

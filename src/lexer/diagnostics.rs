@@ -10,6 +10,12 @@ use crate::lexer::span::Span;
 pub enum DiagnosticCode {
     /// Placeholder for incomplete input that may recover with another line.
     IncompleteInput,
+    /// Unterminated single quote (`'...'`) sequence.
+    UnterminatedSingleQuote,
+    /// Unterminated double quote (`"..."`) sequence.
+    UnterminatedDoubleQuote,
+    /// Unterminated dollar-single quote (`$'...'`) sequence.
+    UnterminatedDollarSingleQuote,
     /// Placeholder for internal invariant violations.
     InternalInvariant,
 }
@@ -48,4 +54,10 @@ pub enum RecoverableLexError {
 pub enum FatalLexError {
     /// An invariant required for scanning was violated.
     InternalInvariant(LexDiagnostic),
+    /// Input ended before a single-quoted region closed.
+    UnterminatedSingleQuote(LexDiagnostic),
+    /// Input ended before a double-quoted region closed.
+    UnterminatedDoubleQuote(LexDiagnostic),
+    /// Input ended before a dollar-single-quoted region closed.
+    UnterminatedDollarSingleQuote(LexDiagnostic),
 }

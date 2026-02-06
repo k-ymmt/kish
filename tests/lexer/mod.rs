@@ -11,6 +11,7 @@ mod line_continuation;
 mod newline_preservation;
 mod next_token_behavior;
 mod operator_scanning;
+mod quote_scanning;
 mod source_span_types;
 mod token_model;
 mod word_boundaries;

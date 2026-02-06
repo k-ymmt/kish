@@ -1,8 +1,8 @@
 //! POSIX-oriented lexer module.
 //!
-//! Phase 3 adds core operator and boundary tokenization:
+//! Phase 4 adds quote-state token scanning:
 //! longest-match operators, token-start comments, newline preservation, and
-//! quote-aware boundary protection with deferred quote semantics.
+//! quote metadata/diagnostics for `'...'`, `"..."`, `$'...'`, and backslashes.
 
 pub mod diagnostics;
 pub mod span;
@@ -18,6 +18,9 @@ mod substitution;
 
 use crate::lexer::cursor::Cursor;
 use crate::lexer::operator::{has_operator_prefix, scan_operator};
+use crate::lexer::quote::{
+    OpenQuoteKind, QuoteScanner, push_quote_marker, unterminated_quote_error,
+};
 use crate::lexer::scanner::{
     QuoteContext, consume_line_continuation_if_unquoted, is_comment_start,
 };
@@ -45,12 +48,12 @@ pub enum LexerMode {
 
 /// A POSIX-first lexer with placeholder scanning behavior.
 ///
-/// Phase 3 behavior:
+/// Phase 4 behavior:
 /// - recognizes longest-match operators
 /// - preserves newline tokens
 /// - removes unquoted `\\\n` before token delimiting
 /// - applies token-start `#` comment skipping
-/// - uses quote-aware boundary protection only (full quote semantics deferred)
+/// - preserves quote bytes and records quote metadata ranges per token
 pub struct Lexer<'a> {
     input: &'a str,
     mode: LexerMode,
@@ -76,12 +79,13 @@ impl<'a> Lexer<'a> {
 
     /// Scans and returns the next lexical step.
     ///
-    /// Phase 3 behavior:
+    /// Phase 4 behavior:
     /// - returns [`LexStep::EndOfInput`] once all input is consumed
     /// - emits one [`TokenKind::Newline`] per `\n`
     /// - emits [`TokenKind::Operator`] using longest-match rules
     /// - emits one [`TokenKind::Token`] for contiguous non-delimiter bytes
     /// - removes unquoted line continuations (`\\\n`) while scanning
+    /// - records quote/backslash markers for word tokens
     pub fn next_token(&mut self) -> Result<LexStep, FatalLexError> {
         self.skip_horizontal_whitespace();
 
@@ -124,17 +128,17 @@ impl<'a> Lexer<'a> {
 
     fn scan_word_token(&mut self) -> Result<LexStep, FatalLexError> {
         let start = self.cursor.offset();
-        let mut quote_context = QuoteContext::default();
+        let mut quote_scanner = QuoteScanner::default();
         let mut lexeme_bytes = Vec::new();
-        let mut previous_byte: Option<u8> = None;
+        let mut quote_markers = Vec::new();
 
         while !self.cursor.is_eof(self.input) {
-            if consume_line_continuation_if_unquoted(
-                &mut self.cursor,
-                self.input,
-                &mut quote_context,
-            ) {
-                previous_byte = None;
+            if quote_scanner.is_unquoted()
+                && self.cursor.peek_byte(self.input) == Some(b'\\')
+                && self.cursor.peek_next_byte(self.input) == Some(b'\n')
+            {
+                let _ = self.cursor.advance_byte(self.input);
+                let _ = self.cursor.advance_byte(self.input);
                 continue;
             }
 
@@ -142,28 +146,141 @@ impl<'a> Lexer<'a> {
                 break;
             };
 
-            if quote_context.is_unquoted()
+            if quote_scanner.is_unquoted()
                 && (byte.is_ascii_whitespace() || has_operator_prefix(&self.cursor, self.input))
             {
                 break;
             }
 
-            let next_byte = self.cursor.peek_next_byte(self.input);
-            let consumed = self
-                .cursor
-                .advance_byte(self.input)
-                .expect("peeked byte must be consumable");
-            quote_context.observe_byte_for_boundary(consumed, previous_byte, next_byte);
-            lexeme_bytes.push(consumed);
-            previous_byte = Some(consumed);
+            let token_start = lexeme_bytes.len();
+            let source_start = self.cursor.offset();
+
+            if let Some(open) = quote_scanner.open_quote() {
+                match open.kind {
+                    OpenQuoteKind::Single => {
+                        let consumed = self
+                            .cursor
+                            .advance_byte(self.input)
+                            .expect("peeked byte must be consumable");
+                        lexeme_bytes.push(consumed);
+                        if consumed == b'\'' {
+                            let closed = quote_scanner
+                                .close(OpenQuoteKind::Single)
+                                .expect("open quote kind should match");
+                            push_quote_marker(
+                                &mut quote_markers,
+                                QuoteProvenance::SingleQuoted,
+                                closed.token_start,
+                                lexeme_bytes.len(),
+                            );
+                        }
+                    }
+                    OpenQuoteKind::Double => {
+                        if byte == b'\\' {
+                            self.consume_backslash_escape(&mut lexeme_bytes, &mut quote_markers);
+                            continue;
+                        }
+                        let consumed = self
+                            .cursor
+                            .advance_byte(self.input)
+                            .expect("peeked byte must be consumable");
+                        lexeme_bytes.push(consumed);
+                        if consumed == b'"' {
+                            let closed = quote_scanner
+                                .close(OpenQuoteKind::Double)
+                                .expect("open quote kind should match");
+                            push_quote_marker(
+                                &mut quote_markers,
+                                QuoteProvenance::DoubleQuoted,
+                                closed.token_start,
+                                lexeme_bytes.len(),
+                            );
+                        }
+                    }
+                    OpenQuoteKind::DollarSingle => {
+                        if byte == b'\\' {
+                            self.consume_backslash_escape(&mut lexeme_bytes, &mut quote_markers);
+                            continue;
+                        }
+                        let consumed = self
+                            .cursor
+                            .advance_byte(self.input)
+                            .expect("peeked byte must be consumable");
+                        lexeme_bytes.push(consumed);
+                        if consumed == b'\'' {
+                            let closed = quote_scanner
+                                .close(OpenQuoteKind::DollarSingle)
+                                .expect("open quote kind should match");
+                            push_quote_marker(
+                                &mut quote_markers,
+                                QuoteProvenance::DollarSingleQuoted,
+                                closed.token_start,
+                                lexeme_bytes.len(),
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
+
+            match byte {
+                b'\\' => self.consume_backslash_escape(&mut lexeme_bytes, &mut quote_markers),
+                b'\'' => {
+                    let consumed = self
+                        .cursor
+                        .advance_byte(self.input)
+                        .expect("peeked byte must be consumable");
+                    lexeme_bytes.push(consumed);
+                    quote_scanner.open(OpenQuoteKind::Single, token_start, source_start);
+                }
+                b'"' => {
+                    let consumed = self
+                        .cursor
+                        .advance_byte(self.input)
+                        .expect("peeked byte must be consumable");
+                    lexeme_bytes.push(consumed);
+                    quote_scanner.open(OpenQuoteKind::Double, token_start, source_start);
+                }
+                b'$' if self.cursor.peek_next_byte(self.input) == Some(b'\'') => {
+                    let dollar = self
+                        .cursor
+                        .advance_byte(self.input)
+                        .expect("peeked byte must be consumable");
+                    lexeme_bytes.push(dollar);
+                    let quote = self
+                        .cursor
+                        .advance_byte(self.input)
+                        .expect("second byte for dollar-single quote must exist");
+                    lexeme_bytes.push(quote);
+                    quote_scanner.open(OpenQuoteKind::DollarSingle, token_start, source_start);
+                }
+                _ => {
+                    let consumed = self
+                        .cursor
+                        .advance_byte(self.input)
+                        .expect("peeked byte must be consumable");
+                    lexeme_bytes.push(consumed);
+                }
+            }
+        }
+
+        if let Some(open) = quote_scanner.open_quote() {
+            return Err(unterminated_quote_error(
+                self.source_id,
+                open,
+                self.input,
+                self.cursor.offset(),
+            ));
         }
 
         let end = self.cursor.offset();
         let lexeme = String::from_utf8(lexeme_bytes).expect("input is valid UTF-8");
-        Ok(LexStep::Token(Token::new(
+        Ok(LexStep::Token(Token::with_metadata(
             TokenKind::Token,
             lexeme,
             Span::new(self.source_id, start, end),
+            quote_markers,
+            Vec::new(),
         )))
     }
 
@@ -278,6 +395,37 @@ impl<'a> Lexer<'a> {
             return Some(NeedMoreReason::TrailingBackslash);
         }
 
+        if let Some(reason) = quote_context.incomplete_reason() {
+            return Some(reason);
+        }
+
         None
+    }
+
+    fn consume_backslash_escape(
+        &mut self,
+        lexeme_bytes: &mut Vec<u8>,
+        quote_markers: &mut Vec<QuoteMarker>,
+    ) {
+        let marker_start = lexeme_bytes.len();
+        let backslash = self
+            .cursor
+            .advance_byte(self.input)
+            .expect("peeked backslash must be consumable");
+        lexeme_bytes.push(backslash);
+        if self.cursor.is_eof(self.input) {
+            return;
+        }
+        let escaped = self
+            .cursor
+            .advance_byte(self.input)
+            .expect("escaped byte must be consumable");
+        lexeme_bytes.push(escaped);
+        push_quote_marker(
+            quote_markers,
+            QuoteProvenance::BackslashEscaped,
+            marker_start,
+            lexeme_bytes.len(),
+        );
     }
 }

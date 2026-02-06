@@ -1,6 +1,7 @@
 //! Scanner helpers for lexer token-recognition utilities.
 
 use crate::lexer::cursor::Cursor;
+use crate::lexer::token::NeedMoreReason;
 
 /// Lightweight quote state for Phase 3 boundary-aware token scanning.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +84,20 @@ impl QuoteContext {
             b'$' if next_byte == Some(b'\'') => self.pending_dollar_single_quote = true,
             _ => {}
         }
+    }
+
+    /// Returns unterminated quote reason at end-of-input, if present.
+    pub(crate) fn incomplete_reason(self) -> Option<NeedMoreReason> {
+        if self.in_single_quote {
+            return Some(NeedMoreReason::UnterminatedSingleQuote);
+        }
+        if self.in_double_quote {
+            return Some(NeedMoreReason::UnterminatedDoubleQuote);
+        }
+        if self.in_dollar_single_quote {
+            return Some(NeedMoreReason::UnterminatedDollarSingleQuote);
+        }
+        None
     }
 }
 

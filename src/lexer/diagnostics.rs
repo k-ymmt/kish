@@ -26,6 +26,8 @@ pub enum DiagnosticCode {
     UnterminatedArithmeticExpansion,
     /// Substitution recursion depth exceeded the lexer cap.
     SubstitutionRecursionDepthExceeded,
+    /// Here-document delimiter was not found before input end.
+    HereDocDelimiterNotFound,
     /// Placeholder for internal invariant violations.
     InternalInvariant,
 }
@@ -80,4 +82,6 @@ pub enum FatalLexError {
     UnterminatedArithmeticExpansion(LexDiagnostic),
     /// Substitution recursion depth exceeded the lexer limit.
     SubstitutionRecursionDepthExceeded(LexDiagnostic),
+    /// Here-document delimiter was not found before input end.
+    HereDocDelimiterNotFound(LexDiagnostic),
 }

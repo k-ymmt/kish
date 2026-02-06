@@ -375,6 +375,8 @@ pub enum NeedMoreReason {
     UnterminatedBackquotedCommandSubstitution,
     /// Unterminated arithmetic expansion in remaining input.
     UnterminatedArithmeticExpansion,
+    /// Here-document delimiter was not found before input end.
+    HereDocDelimiterNotFound,
     /// Incomplete state propagated from recoverable lexer diagnostics.
     Recoverable(RecoverableLexError),
 }

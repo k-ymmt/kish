@@ -30,7 +30,8 @@ fn recoverable_and_fatal_errors_are_distinct_types() {
         | FatalLexError::UnterminatedCommandSubstitution(_)
         | FatalLexError::UnterminatedBackquotedCommandSubstitution(_)
         | FatalLexError::UnterminatedArithmeticExpansion(_)
-        | FatalLexError::SubstitutionRecursionDepthExceeded(_) => {
+        | FatalLexError::SubstitutionRecursionDepthExceeded(_)
+        | FatalLexError::HereDocDelimiterNotFound(_) => {
             panic!("unexpected fatal variant")
         }
     }

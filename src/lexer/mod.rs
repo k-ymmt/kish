@@ -17,6 +17,10 @@ mod scanner;
 mod substitution;
 
 use crate::lexer::cursor::Cursor;
+use crate::lexer::heredoc::{
+    HereDocBodyCapture, PendingHereDocSpec, delimiter_not_found_error, derive_delimiter_spec,
+    is_io_here_operator, is_strip_tabs_operator, line_for_match, strip_tabs_for_match,
+};
 use crate::lexer::operator::{has_operator_prefix, scan_operator};
 use crate::lexer::quote::{
     OpenQuoteKind, QuoteScanner, push_quote_marker, unterminated_quote_error,
@@ -28,6 +32,7 @@ use crate::lexer::substitution::{
     fatal_error_from_scan_error, marker_from_scan, need_more_reason_from_scan_error,
     try_scan_backquote, try_scan_dollar,
 };
+use std::collections::VecDeque;
 
 pub use diagnostics::{DiagnosticCode, FatalLexError, LexDiagnostic, RecoverableLexError};
 pub use span::{ByteOffset, SourceId, Span};
@@ -63,6 +68,9 @@ pub struct Lexer<'a> {
     mode: LexerMode,
     source_id: SourceId,
     cursor: Cursor,
+    pending_heredocs: VecDeque<PendingHereDocSpec>,
+    replay_tokens: VecDeque<Token>,
+    collected_heredoc_bodies: Vec<HereDocBodyCapture>,
 }
 
 impl<'a> Lexer<'a> {
@@ -73,6 +81,9 @@ impl<'a> Lexer<'a> {
             mode,
             source_id: SourceId::new(0),
             cursor: Cursor::new(),
+            pending_heredocs: VecDeque::new(),
+            replay_tokens: VecDeque::new(),
+            collected_heredoc_bodies: Vec::new(),
         }
     }
 
@@ -91,6 +102,27 @@ impl<'a> Lexer<'a> {
     /// - removes unquoted line continuations (`\\\n`) while scanning
     /// - records quote/backslash and substitution markers for word tokens
     pub fn next_token(&mut self) -> Result<LexStep, FatalLexError> {
+        if let Some(token) = self.replay_tokens.pop_front() {
+            return Ok(LexStep::Token(token));
+        }
+
+        let step = self.scan_next_token_raw()?;
+        let LexStep::Token(token) = step else {
+            return Ok(step);
+        };
+
+        let TokenKind::Operator(kind) = token.kind else {
+            return Ok(LexStep::Token(token));
+        };
+
+        if !is_io_here_operator(kind) {
+            return Ok(LexStep::Token(token));
+        }
+
+        self.process_here_doc_line_and_queue(token)
+    }
+
+    fn scan_next_token_raw(&mut self) -> Result<LexStep, FatalLexError> {
         self.skip_horizontal_whitespace();
 
         if self.cursor.is_eof(self.input) {
@@ -300,6 +332,143 @@ impl<'a> Lexer<'a> {
         )))
     }
 
+    fn process_here_doc_line_and_queue(
+        &mut self,
+        first_token: Token,
+    ) -> Result<LexStep, FatalLexError> {
+        self.mode = LexerMode::HereDocPending;
+
+        let mut line_tokens = vec![first_token];
+        let mut expecting_delimiter = line_tokens
+            .last()
+            .and_then(Self::expected_heredoc_delimiter);
+        let mut saw_newline = false;
+
+        loop {
+            match self.scan_next_token_raw()? {
+                LexStep::Token(token) => {
+                    if let Some(strip_tabs) = expecting_delimiter {
+                        if token.kind == TokenKind::Token {
+                            self.pending_heredocs
+                                .push_back(derive_delimiter_spec(&token, strip_tabs));
+                            expecting_delimiter = None;
+                        }
+                    }
+
+                    if let TokenKind::Operator(kind) = token.kind {
+                        if is_io_here_operator(kind) {
+                            expecting_delimiter = Some(is_strip_tabs_operator(kind));
+                        }
+                    }
+
+                    saw_newline = token.kind == TokenKind::Newline;
+                    line_tokens.push(token);
+                    if saw_newline {
+                        break;
+                    }
+                }
+                LexStep::EndOfInput => break,
+                LexStep::Recoverable(error) => return Ok(LexStep::Recoverable(error)),
+            }
+        }
+
+        if saw_newline && !self.pending_heredocs.is_empty() {
+            self.mode = LexerMode::HereDocBody;
+            self.consume_pending_heredoc_bodies()?;
+            self.mode = LexerMode::Normal;
+        } else if saw_newline {
+            self.mode = LexerMode::Normal;
+        }
+
+        self.replay_tokens.extend(line_tokens);
+        let replay = self
+            .replay_tokens
+            .pop_front()
+            .expect("line replay queue must contain at least one token");
+        Ok(LexStep::Token(replay))
+    }
+
+    fn expected_heredoc_delimiter(token: &Token) -> Option<bool> {
+        let TokenKind::Operator(kind) = token.kind else {
+            return None;
+        };
+        if is_io_here_operator(kind) {
+            return Some(is_strip_tabs_operator(kind));
+        }
+        None
+    }
+
+    fn consume_pending_heredoc_bodies(&mut self) -> Result<(), FatalLexError> {
+        while let Some(spec) = self.pending_heredocs.pop_front() {
+            let spec_index = self.collected_heredoc_bodies.len();
+            let body_start = self.cursor.offset();
+            let mut raw_body = String::new();
+
+            let body_end = loop {
+                let line_start = self.cursor.offset();
+                let (line, had_newline) = self.read_raw_line();
+
+                if line.is_empty() && !had_newline {
+                    return Err(delimiter_not_found_error(
+                        self.source_id,
+                        &spec,
+                        self.cursor.offset(),
+                    ));
+                }
+
+                let candidate = line_for_match(&line);
+                let candidate = if spec.strip_tabs {
+                    strip_tabs_for_match(candidate)
+                } else {
+                    candidate
+                };
+
+                if candidate == spec.delimiter_key {
+                    break line_start;
+                }
+
+                raw_body.push_str(&line);
+
+                if !had_newline {
+                    return Err(delimiter_not_found_error(
+                        self.source_id,
+                        &spec,
+                        self.cursor.offset(),
+                    ));
+                }
+            };
+
+            self.collected_heredoc_bodies.push(HereDocBodyCapture {
+                spec_index,
+                start: body_start,
+                end: body_end,
+                raw_body,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn read_raw_line(&mut self) -> (String, bool) {
+        let mut bytes = Vec::new();
+        let mut had_newline = false;
+
+        while let Some(byte) = self.cursor.peek_byte(self.input) {
+            let consumed = self
+                .cursor
+                .advance_byte(self.input)
+                .expect("peeked byte must be consumable");
+            bytes.push(consumed);
+            if byte == b'\n' {
+                had_newline = true;
+                break;
+            }
+        }
+
+        let line = String::from_utf8(bytes).expect("input is valid UTF-8");
+        (line, had_newline)
+    }
+
     fn try_skip_comment_until_newline(&mut self) -> bool {
         let Some(byte) = self.cursor.peek_byte(self.input) else {
             return false;
@@ -336,7 +505,18 @@ impl<'a> Lexer<'a> {
 
         let mut tokens = Vec::new();
         loop {
-            match self.next_token()? {
+            let step = match self.next_token() {
+                Ok(step) => step,
+                Err(FatalLexError::HereDocDelimiterNotFound(_)) => {
+                    return Ok(BoundaryResult::NeedMoreInput(NeedMoreInput::new(
+                        self.cursor.offset(),
+                        NeedMoreReason::HereDocDelimiterNotFound,
+                    )));
+                }
+                Err(error) => return Err(error),
+            };
+
+            match step {
                 LexStep::Token(token) => {
                     let is_newline = token.kind == TokenKind::Newline;
                     tokens.push(token);

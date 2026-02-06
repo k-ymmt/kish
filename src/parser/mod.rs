@@ -13,9 +13,10 @@ pub mod token_stream;
 
 pub use arena::{ArenaError, AstArena, AstNodeId};
 pub use ast::{
-    AndOrAst, AssignmentWordAst, AstBuilder, CaseClauseAst, CommandAst, CompleteCommandAst,
-    CompoundCommandAst, ForClauseAst, FunctionDefinitionAst, IfClauseAst, ListAst, PipelineAst,
-    ProgramAst, RedirectAst, SimpleCommandAst, UntilClauseAst, WhileClauseAst, WordAst,
+    AndOrAst, AssignmentWordAst, AstBuilder, CaseClauseAst, CaseItemAst, CaseTerminatorAst,
+    CommandAst, CompleteCommandAst, CompoundCommandAst, CompoundCommandNodeAst, ForClauseAst,
+    FunctionDefinitionAst, IfClauseAst, ListAst, PipelineAst, ProgramAst, RedirectAst,
+    SimpleCommandAst, UntilClauseAst, WhileClauseAst, WordAst,
 };
 pub use classifier::{
     ClassificationContext, ClassificationOptions, ClassifiedToken, ClassifiedTokenKind, Classifier,

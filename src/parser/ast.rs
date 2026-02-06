@@ -64,7 +64,7 @@ pub enum CommandAst {
     /// Simple command form.
     Simple(SimpleCommandAst),
     /// Compound command form.
-    Compound(CompoundCommandAst),
+    Compound(CompoundCommandNodeAst),
     /// Function definition form.
     FunctionDefinition(FunctionDefinitionAst),
 }
@@ -99,6 +99,17 @@ pub enum CompoundCommandAst {
     Until(UntilClauseAst),
     /// `case` command.
     Case(CaseClauseAst),
+}
+
+/// Compound command wrapper with redirects and source span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompoundCommandNodeAst {
+    /// Compound command kind payload.
+    pub kind: CompoundCommandAst,
+    /// Redirects associated with this command in encounter order.
+    pub redirects: Vec<RedirectAst>,
+    /// Source span for the full compound command with redirects.
+    pub span: Span,
 }
 
 /// Function definition node.
@@ -156,6 +167,8 @@ pub struct IfClauseAst {
     pub condition: ListAst,
     /// Then-body command list.
     pub then_body: ListAst,
+    /// Zero or more `elif` arms in encounter order.
+    pub elif_arms: Vec<(ListAst, ListAst)>,
     /// Optional else-body command list.
     pub else_body: Option<ListAst>,
     /// Source span for this `if` clause.
@@ -202,8 +215,32 @@ pub struct UntilClauseAst {
 pub struct CaseClauseAst {
     /// Subject word.
     pub word: WordAst,
+    /// Case items in source order.
+    pub items: Vec<CaseItemAst>,
     /// Source span for this `case` clause.
     pub span: Span,
+}
+
+/// `case` item payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseItemAst {
+    /// Pattern words (`a | b`).
+    pub patterns: Vec<WordAst>,
+    /// Optional body command list.
+    pub body: Option<ListAst>,
+    /// Optional item terminator (`;;` or `;&`).
+    pub terminator: Option<CaseTerminatorAst>,
+    /// Source span for this case item.
+    pub span: Span,
+}
+
+/// `case` item terminator kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseTerminatorAst {
+    /// `;;`
+    DoubleSemicolon,
+    /// `;&`
+    SemicolonAmpersand,
 }
 
 /// Lightweight AST builder backed by [`AstArena`] accounting.
@@ -280,6 +317,178 @@ impl<'a> AstBuilder<'a> {
     pub fn command_simple(&mut self, command: SimpleCommandAst) -> Result<CommandAst, ParseError> {
         self.reserve_node()?;
         Ok(CommandAst::Simple(command))
+    }
+
+    /// Wraps a compound command into a command node.
+    pub fn command_compound(
+        &mut self,
+        command: CompoundCommandNodeAst,
+    ) -> Result<CommandAst, ParseError> {
+        self.reserve_node()?;
+        Ok(CommandAst::Compound(command))
+    }
+
+    /// Builds a compound-command wrapper.
+    pub fn compound_command_node(
+        &mut self,
+        kind: CompoundCommandAst,
+        redirects: Vec<RedirectAst>,
+        span: Span,
+    ) -> Result<CompoundCommandNodeAst, ParseError> {
+        self.reserve_node()?;
+        Ok(CompoundCommandNodeAst {
+            kind,
+            redirects,
+            span,
+        })
+    }
+
+    /// Builds a subshell compound payload.
+    pub fn compound_subshell(&mut self, list: ListAst) -> Result<CompoundCommandAst, ParseError> {
+        self.reserve_node()?;
+        Ok(CompoundCommandAst::Subshell(list))
+    }
+
+    /// Builds a brace-group compound payload.
+    pub fn compound_brace_group(
+        &mut self,
+        list: ListAst,
+    ) -> Result<CompoundCommandAst, ParseError> {
+        self.reserve_node()?;
+        Ok(CompoundCommandAst::BraceGroup(list))
+    }
+
+    /// Builds an if-clause payload.
+    pub fn compound_if(&mut self, clause: IfClauseAst) -> Result<CompoundCommandAst, ParseError> {
+        self.reserve_node()?;
+        Ok(CompoundCommandAst::If(clause))
+    }
+
+    /// Builds a for-clause payload.
+    pub fn compound_for(&mut self, clause: ForClauseAst) -> Result<CompoundCommandAst, ParseError> {
+        self.reserve_node()?;
+        Ok(CompoundCommandAst::For(clause))
+    }
+
+    /// Builds a while-clause payload.
+    pub fn compound_while(
+        &mut self,
+        clause: WhileClauseAst,
+    ) -> Result<CompoundCommandAst, ParseError> {
+        self.reserve_node()?;
+        Ok(CompoundCommandAst::While(clause))
+    }
+
+    /// Builds an until-clause payload.
+    pub fn compound_until(
+        &mut self,
+        clause: UntilClauseAst,
+    ) -> Result<CompoundCommandAst, ParseError> {
+        self.reserve_node()?;
+        Ok(CompoundCommandAst::Until(clause))
+    }
+
+    /// Builds a case-clause payload.
+    pub fn compound_case(
+        &mut self,
+        clause: CaseClauseAst,
+    ) -> Result<CompoundCommandAst, ParseError> {
+        self.reserve_node()?;
+        Ok(CompoundCommandAst::Case(clause))
+    }
+
+    /// Builds an if clause node.
+    pub fn if_clause(
+        &mut self,
+        condition: ListAst,
+        then_body: ListAst,
+        elif_arms: Vec<(ListAst, ListAst)>,
+        else_body: Option<ListAst>,
+        span: Span,
+    ) -> Result<IfClauseAst, ParseError> {
+        self.reserve_node()?;
+        Ok(IfClauseAst {
+            condition,
+            then_body,
+            elif_arms,
+            else_body,
+            span,
+        })
+    }
+
+    /// Builds a for clause node.
+    pub fn for_clause(
+        &mut self,
+        name: WordAst,
+        words: Vec<WordAst>,
+        body: ListAst,
+        span: Span,
+    ) -> Result<ForClauseAst, ParseError> {
+        self.reserve_node()?;
+        Ok(ForClauseAst {
+            name,
+            words,
+            body,
+            span,
+        })
+    }
+
+    /// Builds a while clause node.
+    pub fn while_clause(
+        &mut self,
+        condition: ListAst,
+        body: ListAst,
+        span: Span,
+    ) -> Result<WhileClauseAst, ParseError> {
+        self.reserve_node()?;
+        Ok(WhileClauseAst {
+            condition,
+            body,
+            span,
+        })
+    }
+
+    /// Builds an until clause node.
+    pub fn until_clause(
+        &mut self,
+        condition: ListAst,
+        body: ListAst,
+        span: Span,
+    ) -> Result<UntilClauseAst, ParseError> {
+        self.reserve_node()?;
+        Ok(UntilClauseAst {
+            condition,
+            body,
+            span,
+        })
+    }
+
+    /// Builds a case item node.
+    pub fn case_item(
+        &mut self,
+        patterns: Vec<WordAst>,
+        body: Option<ListAst>,
+        terminator: Option<CaseTerminatorAst>,
+        span: Span,
+    ) -> Result<CaseItemAst, ParseError> {
+        self.reserve_node()?;
+        Ok(CaseItemAst {
+            patterns,
+            body,
+            terminator,
+            span,
+        })
+    }
+
+    /// Builds a case clause node.
+    pub fn case_clause(
+        &mut self,
+        word: WordAst,
+        items: Vec<CaseItemAst>,
+        span: Span,
+    ) -> Result<CaseClauseAst, ParseError> {
+        self.reserve_node()?;
+        Ok(CaseClauseAst { word, items, span })
     }
 
     /// Builds a pipeline node.

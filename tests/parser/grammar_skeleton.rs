@@ -1,5 +1,8 @@
 use kish::lexer::{Lexer, LexerMode, OperatorKind, SourceId};
-use kish::parser::{CommandAst, ParseErrorKind, ParseOptions, ParseStep, Parser, TokenStream};
+use kish::parser::{
+    CaseTerminatorAst, CommandAst, CompoundCommandAst, CompoundCommandNodeAst, ListAst,
+    ParseErrorKind, ParseOptions, ParseStep, Parser, TokenStream,
+};
 
 fn parser_for(input: &str, options: ParseOptions) -> Parser<'_> {
     let lexer = Lexer::new(input, LexerMode::Normal);
@@ -24,6 +27,28 @@ fn first_simple(step: &ParseStep) -> &kish::parser::SimpleCommandAst {
     };
 
     let and_or = command.list.and_ors.first().expect("and_or exists");
+    let pipeline = &and_or.head;
+    match pipeline.commands.first().expect("command exists") {
+        CommandAst::Simple(simple) => simple,
+        other => panic!("expected simple command, got {other:?}"),
+    }
+}
+
+fn first_compound(step: &ParseStep) -> &CompoundCommandNodeAst {
+    let ParseStep::Complete(command) = step else {
+        panic!("expected ParseStep::Complete");
+    };
+
+    let and_or = command.list.and_ors.first().expect("and_or exists");
+    let pipeline = &and_or.head;
+    match pipeline.commands.first().expect("command exists") {
+        CommandAst::Compound(compound) => compound,
+        other => panic!("expected compound command, got {other:?}"),
+    }
+}
+
+fn first_simple_in_list(list: &ListAst) -> &kish::parser::SimpleCommandAst {
+    let and_or = list.and_ors.first().expect("and_or exists");
     let pipeline = &and_or.head;
     match pipeline.commands.first().expect("command exists") {
         CommandAst::Simple(simple) => simple,
@@ -112,14 +137,16 @@ fn parse_complete_command_is_boundary_safe_across_multiple_commands() {
 }
 
 #[test]
-fn unimplemented_reserved_word_fails_fast() {
-    let mut parser = parser_for("if true\n", ParseOptions::default());
+fn missing_then_in_if_fails() {
+    let mut parser = parser_for("if echo a; fi\n", ParseOptions::default());
     let error = parser
         .parse_complete_command()
-        .expect_err("if clause should be deferred");
+        .expect_err("if clause must require then");
 
-    assert_eq!(error.kind, ParseErrorKind::GrammarNotImplemented);
-    assert_eq!(error.found.as_deref(), Some("if"));
+    assert!(matches!(
+        error.kind,
+        ParseErrorKind::UnexpectedEndOfInput | ParseErrorKind::UnexpectedToken
+    ));
 }
 
 #[test]
@@ -307,6 +334,190 @@ fn function_definition_head_is_detected_and_deferred() {
 
     assert_eq!(error.kind, ParseErrorKind::GrammarNotImplemented);
     assert_eq!(error.found.as_deref(), Some("foo"));
+}
+
+#[test]
+fn subshell_compound_parses() {
+    let step = parse_one("(echo hi)\n");
+    let compound = first_compound(&step);
+    assert!(compound.redirects.is_empty());
+
+    let CompoundCommandAst::Subshell(list) = &compound.kind else {
+        panic!("expected subshell");
+    };
+    let simple = first_simple_in_list(list);
+    let lexemes: Vec<&str> = simple
+        .words
+        .iter()
+        .map(|word| word.token.lexeme.as_str())
+        .collect();
+    assert_eq!(lexemes, vec!["echo", "hi"]);
+}
+
+#[test]
+fn brace_group_compound_parses() {
+    let step = parse_one("{ echo hi; }\n");
+    let compound = first_compound(&step);
+    assert!(compound.redirects.is_empty());
+
+    let CompoundCommandAst::BraceGroup(list) = &compound.kind else {
+        panic!("expected brace group");
+    };
+    let simple = first_simple_in_list(list);
+    let lexemes: Vec<&str> = simple
+        .words
+        .iter()
+        .map(|word| word.token.lexeme.as_str())
+        .collect();
+    assert_eq!(lexemes, vec!["echo", "hi"]);
+}
+
+#[test]
+fn compound_redirects_attach_and_preserve_order() {
+    let step = parse_one("{ echo; } >out 2>&1\n");
+    let compound = first_compound(&step);
+
+    assert_eq!(compound.redirects.len(), 2);
+    assert_eq!(compound.redirects[0].operator, OperatorKind::Greater);
+    assert_eq!(compound.redirects[0].target.token.lexeme, "out");
+    assert_eq!(compound.redirects[1].operator, OperatorKind::DupOutput);
+    assert_eq!(compound.redirects[1].target.token.lexeme, "1");
+    assert_eq!(
+        compound.redirects[1]
+            .fd_or_location
+            .as_ref()
+            .map(|token| token.lexeme.as_str()),
+        Some("2")
+    );
+}
+
+#[test]
+fn if_elif_else_compound_parses() {
+    let step = parse_one("if echo a; then echo b; elif echo c; then echo d; else echo e; fi\n");
+    let compound = first_compound(&step);
+
+    let CompoundCommandAst::If(if_clause) = &compound.kind else {
+        panic!("expected if clause");
+    };
+    assert_eq!(if_clause.elif_arms.len(), 1);
+    assert!(if_clause.else_body.is_some());
+}
+
+#[test]
+fn while_compound_parses() {
+    let step = parse_one("while echo a; do echo b; done\n");
+    let compound = first_compound(&step);
+    assert!(matches!(compound.kind, CompoundCommandAst::While(_)));
+}
+
+#[test]
+fn until_compound_parses() {
+    let step = parse_one("until echo a; do echo b; done\n");
+    let compound = first_compound(&step);
+    assert!(matches!(compound.kind, CompoundCommandAst::Until(_)));
+}
+
+#[test]
+fn for_forms_parse() {
+    let a = parse_one("for i do echo x; done\n");
+    let b = parse_one("for i; do echo x; done\n");
+    let c = parse_one("for i in a b; do echo x; done\n");
+
+    let CompoundCommandAst::For(for_a) = &first_compound(&a).kind else {
+        panic!("expected for clause");
+    };
+    assert!(for_a.words.is_empty());
+
+    let CompoundCommandAst::For(for_b) = &first_compound(&b).kind else {
+        panic!("expected for clause");
+    };
+    assert!(for_b.words.is_empty());
+
+    let CompoundCommandAst::For(for_c) = &first_compound(&c).kind else {
+        panic!("expected for clause");
+    };
+    let words: Vec<&str> = for_c
+        .words
+        .iter()
+        .map(|word| word.token.lexeme.as_str())
+        .collect();
+    assert_eq!(words, vec!["a", "b"]);
+}
+
+#[test]
+fn case_with_terminators_parses() {
+    let step = parse_one("case x in a) echo a ;; b) echo b ;& esac\n");
+    let compound = first_compound(&step);
+
+    let CompoundCommandAst::Case(case_clause) = &compound.kind else {
+        panic!("expected case clause");
+    };
+    assert_eq!(case_clause.items.len(), 2);
+    assert_eq!(
+        case_clause.items[0].terminator,
+        Some(CaseTerminatorAst::DoubleSemicolon)
+    );
+    assert_eq!(
+        case_clause.items[1].terminator,
+        Some(CaseTerminatorAst::SemicolonAmpersand)
+    );
+}
+
+#[test]
+fn case_non_terminated_item_parses() {
+    let step = parse_one("case x in a) echo a\nesac\n");
+    let compound = first_compound(&step);
+
+    let CompoundCommandAst::Case(case_clause) = &compound.kind else {
+        panic!("expected case clause");
+    };
+    assert_eq!(case_clause.items.len(), 1);
+    assert_eq!(case_clause.items[0].terminator, None);
+}
+
+#[test]
+fn missing_do_after_while_fails() {
+    let mut parser = parser_for("while echo a; done\n", ParseOptions::default());
+    let error = parser
+        .parse_complete_command()
+        .expect_err("while clause must require do");
+    assert!(matches!(
+        error.kind,
+        ParseErrorKind::UnexpectedEndOfInput | ParseErrorKind::UnexpectedToken
+    ));
+}
+
+#[test]
+fn missing_esac_fails() {
+    let mut parser = parser_for("case x in a) echo a ;;\n", ParseOptions::default());
+    let error = parser
+        .parse_complete_command()
+        .expect_err("case clause must require esac");
+    assert!(matches!(
+        error.kind,
+        ParseErrorKind::UnexpectedEndOfInput | ParseErrorKind::UnexpectedToken
+    ));
+}
+
+#[test]
+fn unterminated_subshell_and_brace_group_fail() {
+    let mut subshell = parser_for("(echo\n", ParseOptions::default());
+    let subshell_error = subshell
+        .parse_complete_command()
+        .expect_err("unterminated subshell must fail");
+    assert!(matches!(
+        subshell_error.kind,
+        ParseErrorKind::UnexpectedEndOfInput | ParseErrorKind::UnexpectedToken
+    ));
+
+    let mut brace = parser_for("{ echo\n", ParseOptions::default());
+    let brace_error = brace
+        .parse_complete_command()
+        .expect_err("unterminated brace group must fail");
+    assert!(matches!(
+        brace_error.kind,
+        ParseErrorKind::UnexpectedEndOfInput | ParseErrorKind::UnexpectedToken
+    ));
 }
 
 #[test]

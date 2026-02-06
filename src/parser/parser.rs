@@ -3,8 +3,10 @@
 use crate::lexer::{DelimiterContext, OperatorKind, SourceId, Span, Token, TokenKind};
 use crate::parser::arena::AstArena;
 use crate::parser::ast::{
-    AndOrAst, AssignmentWordAst, AstBuilder, CommandAst, CompleteCommandAst, ListAst, PipelineAst,
-    ProgramAst, RedirectAst, SimpleCommandAst, WordAst,
+    AndOrAst, AssignmentWordAst, AstBuilder, CaseClauseAst, CaseItemAst, CaseTerminatorAst,
+    CommandAst, CompleteCommandAst, CompoundCommandAst, CompoundCommandNodeAst, ForClauseAst,
+    IfClauseAst, ListAst, PipelineAst, ProgramAst, RedirectAst, SimpleCommandAst, UntilClauseAst,
+    WhileClauseAst, WordAst,
 };
 use crate::parser::classifier::{
     ClassificationContext, ClassificationOptions, ClassifiedTokenKind, Classifier, NameContext,
@@ -266,10 +268,8 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Operator(kind) => {
                 if kind == OperatorKind::LeftParen {
-                    return Err(ParseFailure::Error(ParseError::grammar_not_implemented(
-                        Some(head.span),
-                        Some(head.lexeme),
-                    )));
+                    let compound = self.parse_compound_command_nonterminal()?;
+                    return self.build_command_compound(compound);
                 }
                 if is_redirect_operator(kind) {
                     let simple = self.parse_simple_command_nonterminal()?;
@@ -283,6 +283,12 @@ impl<'a> Parser<'a> {
             TokenKind::Token => {}
         }
 
+        let _ = self.try_parse_function_definition_head()?;
+        if self.can_start_compound_command()? {
+            let compound = self.parse_compound_command_nonterminal()?;
+            return self.build_command_compound(compound);
+        }
+
         let head_kind = self.classify_token_at(
             0,
             ClassificationContext {
@@ -292,9 +298,9 @@ impl<'a> Parser<'a> {
         )?;
         match head_kind {
             ClassifiedTokenKind::ReservedWord(word) if is_unimplemented_reserved(word) => {
-                return Err(ParseFailure::Error(ParseError::grammar_not_implemented(
-                    Some(head.span),
-                    Some(head.lexeme),
+                return Err(ParseFailure::Error(ParseError::unexpected_token(
+                    &head,
+                    ["WORD"],
                 )));
             }
             ClassifiedTokenKind::Word
@@ -310,9 +316,496 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let _ = self.try_parse_function_definition_head()?;
         let simple = self.parse_simple_command_nonterminal()?;
         self.build_command_simple(simple)
+    }
+
+    fn can_start_compound_command(&mut self) -> ParseResult<bool> {
+        let Some(head) = self.peek_token(0)? else {
+            return Ok(false);
+        };
+
+        match head.kind {
+            TokenKind::Operator(OperatorKind::LeftParen) => Ok(true),
+            TokenKind::Operator(_) | TokenKind::Newline => Ok(false),
+            TokenKind::Token => {
+                if is_plain_brace_open_token(&head) {
+                    return Ok(true);
+                }
+
+                Ok(matches!(
+                    self.peek_reserved_word(ReservedWordPolicy::Any)?,
+                    Some(
+                        ReservedWord::If
+                            | ReservedWord::For
+                            | ReservedWord::While
+                            | ReservedWord::Until
+                            | ReservedWord::Case
+                    )
+                ))
+            }
+        }
+    }
+
+    fn parse_compound_command_nonterminal(&mut self) -> ParseResult<CompoundCommandNodeAst> {
+        let (kind, payload_span) = self.parse_compound_payload_nonterminal()?;
+        let redirects = self.parse_redirect_list_nonterminal()?;
+        let span = redirects
+            .last()
+            .map(|redirect| merge_spans(payload_span, redirect.span))
+            .unwrap_or(payload_span);
+        self.build_compound_command_node(kind, redirects, span)
+    }
+
+    fn parse_compound_payload_nonterminal(&mut self) -> ParseResult<(CompoundCommandAst, Span)> {
+        let head = self.peek_token(0)?.ok_or_else(|| {
+            ParseFailure::Error(ParseError::unexpected_end_of_input(["compound_command"]))
+        })?;
+
+        match head.kind {
+            TokenKind::Operator(OperatorKind::LeftParen) => self.parse_subshell_nonterminal(),
+            TokenKind::Operator(_) | TokenKind::Newline => Err(ParseFailure::Error(
+                ParseError::unexpected_token(&head, ["compound_command"]),
+            )),
+            TokenKind::Token if is_plain_brace_open_token(&head) => {
+                self.parse_brace_group_nonterminal()
+            }
+            TokenKind::Token => match self.peek_reserved_word(ReservedWordPolicy::Any)? {
+                Some(ReservedWord::If) => self.parse_if_clause_nonterminal(),
+                Some(ReservedWord::For) => self.parse_for_clause_nonterminal(),
+                Some(ReservedWord::While) => self.parse_while_clause_nonterminal(),
+                Some(ReservedWord::Until) => self.parse_until_clause_nonterminal(),
+                Some(ReservedWord::Case) => self.parse_case_clause_nonterminal(),
+                _ => Err(ParseFailure::Error(ParseError::unexpected_token(
+                    &head,
+                    ["compound_command"],
+                ))),
+            },
+        }
+    }
+
+    fn parse_subshell_nonterminal(&mut self) -> ParseResult<(CompoundCommandAst, Span)> {
+        let start = self.consume_operator_kind(OperatorKind::LeftParen)?;
+        let body = self.parse_compound_list_nonterminal(StopSet::right_paren())?;
+        let end = self.consume_operator_kind(OperatorKind::RightParen)?;
+        let span = merge_spans(start.span, end.span);
+        let kind = self.build_compound_subshell(body)?;
+        Ok((kind, span))
+    }
+
+    fn parse_brace_group_nonterminal(&mut self) -> ParseResult<(CompoundCommandAst, Span)> {
+        let start = self.consume_plain_token("{")?;
+        let body = self.parse_compound_list_nonterminal(StopSet::right_brace())?;
+        let end = self.consume_plain_token("}")?;
+        let span = merge_spans(start.span, end.span);
+        let kind = self.build_compound_brace_group(body)?;
+        Ok((kind, span))
+    }
+
+    fn parse_if_clause_nonterminal(&mut self) -> ParseResult<(CompoundCommandAst, Span)> {
+        let start = self.consume_reserved_word(ReservedWord::If, ReservedWordPolicy::Any)?;
+        let condition = self.parse_compound_list_nonterminal(StopSet::then_only())?;
+        let _then = self.consume_reserved_word(ReservedWord::Then, ReservedWordPolicy::Any)?;
+        let then_body = self.parse_compound_list_nonterminal(StopSet::else_elif_fi())?;
+
+        let mut elif_arms = Vec::new();
+        while self.peek_reserved_word(ReservedWordPolicy::Any)? == Some(ReservedWord::Elif) {
+            let _elif = self.consume_reserved_word(ReservedWord::Elif, ReservedWordPolicy::Any)?;
+            let elif_condition = self.parse_compound_list_nonterminal(StopSet::then_only())?;
+            let _then = self.consume_reserved_word(ReservedWord::Then, ReservedWordPolicy::Any)?;
+            let elif_body = self.parse_compound_list_nonterminal(StopSet::else_elif_fi())?;
+            elif_arms.push((elif_condition, elif_body));
+        }
+
+        let else_body = if self.peek_reserved_word(ReservedWordPolicy::Any)?
+            == Some(ReservedWord::Else)
+        {
+            let _else = self.consume_reserved_word(ReservedWord::Else, ReservedWordPolicy::Any)?;
+            Some(self.parse_compound_list_nonterminal(StopSet::fi_only())?)
+        } else {
+            None
+        };
+
+        let end = self.consume_reserved_word(ReservedWord::Fi, ReservedWordPolicy::Any)?;
+        let span = merge_spans(start.span, end.span);
+        let clause = self.build_if_clause(condition, then_body, elif_arms, else_body, span)?;
+        let kind = self.build_compound_if(clause)?;
+        Ok((kind, span))
+    }
+
+    fn parse_for_clause_nonterminal(&mut self) -> ParseResult<(CompoundCommandAst, Span)> {
+        let start = self.consume_reserved_word(ReservedWord::For, ReservedWordPolicy::Any)?;
+        let name = self.parse_name_word_nonterminal()?;
+
+        self.parse_linebreak()?;
+        let mut words = Vec::new();
+        if self.peek_reserved_word(ReservedWordPolicy::InOnly)? == Some(ReservedWord::In) {
+            let _in = self.consume_reserved_word(ReservedWord::In, ReservedWordPolicy::InOnly)?;
+            if !self.parse_sequential_sep()? {
+                words = self.parse_wordlist_nonterminal()?;
+                if !self.parse_sequential_sep()? {
+                    let found = self.peek_token(0)?.ok_or_else(|| {
+                        ParseFailure::Error(ParseError::unexpected_end_of_input([
+                            "for clause separator",
+                        ]))
+                    })?;
+                    return Err(ParseFailure::Error(ParseError::unexpected_token(
+                        &found,
+                        ["for clause separator"],
+                    )));
+                }
+            }
+        } else {
+            let _ = self.parse_sequential_sep()?;
+        }
+
+        let (body, do_group_span) = self.parse_do_group_nonterminal()?;
+        let span = merge_spans(start.span, do_group_span);
+        let clause = self.build_for_clause(name, words, body, span)?;
+        let kind = self.build_compound_for(clause)?;
+        Ok((kind, span))
+    }
+
+    fn parse_while_clause_nonterminal(&mut self) -> ParseResult<(CompoundCommandAst, Span)> {
+        let start = self.consume_reserved_word(ReservedWord::While, ReservedWordPolicy::Any)?;
+        let condition = self.parse_compound_list_nonterminal(StopSet::do_only())?;
+        let (body, do_group_span) = self.parse_do_group_nonterminal()?;
+        let span = merge_spans(start.span, do_group_span);
+        let clause = self.build_while_clause(condition, body, span)?;
+        let kind = self.build_compound_while(clause)?;
+        Ok((kind, span))
+    }
+
+    fn parse_until_clause_nonterminal(&mut self) -> ParseResult<(CompoundCommandAst, Span)> {
+        let start = self.consume_reserved_word(ReservedWord::Until, ReservedWordPolicy::Any)?;
+        let condition = self.parse_compound_list_nonterminal(StopSet::do_only())?;
+        let (body, do_group_span) = self.parse_do_group_nonterminal()?;
+        let span = merge_spans(start.span, do_group_span);
+        let clause = self.build_until_clause(condition, body, span)?;
+        let kind = self.build_compound_until(clause)?;
+        Ok((kind, span))
+    }
+
+    fn parse_case_clause_nonterminal(&mut self) -> ParseResult<(CompoundCommandAst, Span)> {
+        let start = self.consume_reserved_word(ReservedWord::Case, ReservedWordPolicy::Any)?;
+        let word = self.parse_plain_word_nonterminal()?;
+        self.parse_linebreak()?;
+        let _in = self.consume_reserved_word(ReservedWord::In, ReservedWordPolicy::InOnly)?;
+        self.parse_linebreak()?;
+
+        let mut items = Vec::new();
+        while self.peek_reserved_word(ReservedWordPolicy::EsacOnly)? != Some(ReservedWord::Esac) {
+            let item = self.parse_case_item_nonterminal()?;
+            let has_terminator = item.terminator.is_some();
+            items.push(item);
+
+            if !has_terminator {
+                if self.peek_reserved_word(ReservedWordPolicy::EsacOnly)?
+                    != Some(ReservedWord::Esac)
+                {
+                    let found = self.peek_token(0)?.ok_or_else(|| {
+                        ParseFailure::Error(ParseError::unexpected_end_of_input(["esac"]))
+                    })?;
+                    return Err(ParseFailure::Error(ParseError::unexpected_token(
+                        &found,
+                        ["esac"],
+                    )));
+                }
+                break;
+            }
+        }
+
+        let end = self.consume_reserved_word(ReservedWord::Esac, ReservedWordPolicy::EsacOnly)?;
+        let span = merge_spans(start.span, end.span);
+        let clause = self.build_case_clause(word, items, span)?;
+        let kind = self.build_compound_case(clause)?;
+        Ok((kind, span))
+    }
+
+    fn parse_case_item_nonterminal(&mut self) -> ParseResult<CaseItemAst> {
+        let (patterns, start_span) = self.parse_case_pattern_list_nonterminal()?;
+        let close = self.consume_operator_kind(OperatorKind::RightParen)?;
+        self.parse_linebreak()?;
+
+        let mut body = None;
+        let mut terminator = None;
+        let mut end_span = close.span;
+
+        if let Some((term, token)) = self.consume_case_item_terminator()? {
+            terminator = Some(term);
+            end_span = token.span;
+            self.parse_linebreak()?;
+        } else if self.peek_reserved_word(ReservedWordPolicy::EsacOnly)? == Some(ReservedWord::Esac)
+        {
+            // no-op: empty non-terminated case item
+        } else {
+            let parsed_body = self.parse_compound_list_nonterminal(StopSet::case_item_body())?;
+            end_span = parsed_body.span;
+            body = Some(parsed_body);
+
+            if let Some((term, token)) = self.consume_case_item_terminator()? {
+                terminator = Some(term);
+                end_span = token.span;
+                self.parse_linebreak()?;
+            }
+        }
+
+        let span = merge_spans(start_span, end_span);
+        self.build_case_item(patterns, body, terminator, span)
+    }
+
+    fn parse_case_pattern_list_nonterminal(&mut self) -> ParseResult<(Vec<WordAst>, Span)> {
+        let mut start_span = None;
+        if self.peek_operator_kind(0)? == Some(OperatorKind::LeftParen) {
+            let token = self.consume_operator_kind(OperatorKind::LeftParen)?;
+            start_span = Some(token.span);
+        }
+
+        let first = self.parse_plain_word_nonterminal()?;
+        let mut patterns = vec![first];
+        while self.peek_operator_kind(0)? == Some(OperatorKind::Pipe) {
+            let _pipe = self.consume_operator_kind(OperatorKind::Pipe)?;
+            patterns.push(self.parse_plain_word_nonterminal()?);
+        }
+
+        let span = start_span.unwrap_or(patterns[0].span);
+        Ok((patterns, span))
+    }
+
+    fn consume_case_item_terminator(&mut self) -> ParseResult<Option<(CaseTerminatorAst, Token)>> {
+        match self.peek_operator_kind(0)? {
+            Some(OperatorKind::DoubleSemicolon) => {
+                let token = self.consume_operator_kind(OperatorKind::DoubleSemicolon)?;
+                Ok(Some((CaseTerminatorAst::DoubleSemicolon, token)))
+            }
+            Some(OperatorKind::SemicolonAmpersand) => {
+                let token = self.consume_operator_kind(OperatorKind::SemicolonAmpersand)?;
+                Ok(Some((CaseTerminatorAst::SemicolonAmpersand, token)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn parse_do_group_nonterminal(&mut self) -> ParseResult<(ListAst, Span)> {
+        let start = self.consume_reserved_word(ReservedWord::Do, ReservedWordPolicy::InOrDo)?;
+        let body = self.parse_compound_list_nonterminal(StopSet::done_only())?;
+        let end = self.consume_reserved_word(ReservedWord::Done, ReservedWordPolicy::Any)?;
+        Ok((body, merge_spans(start.span, end.span)))
+    }
+
+    fn parse_compound_list_nonterminal(&mut self, stop: StopSet) -> ParseResult<ListAst> {
+        self.parse_linebreak()?;
+        self.parse_term_nonterminal(stop)
+    }
+
+    fn parse_term_nonterminal(&mut self, stop: StopSet) -> ParseResult<ListAst> {
+        if self.at_compound_stop(stop)? {
+            let found = self.peek_token(0)?.ok_or_else(|| {
+                ParseFailure::Error(ParseError::unexpected_end_of_input(["and_or"]))
+            })?;
+            return Err(ParseFailure::Error(ParseError::unexpected_token(
+                &found,
+                ["and_or"],
+            )));
+        }
+
+        let mut and_ors = vec![self.parse_and_or_nonterminal()?];
+        loop {
+            if !self.parse_separator_nonterminal(stop)? {
+                break;
+            }
+
+            if self.at_compound_stop(stop)? {
+                break;
+            }
+
+            and_ors.push(self.parse_and_or_nonterminal()?);
+        }
+
+        let span = span_of_and_ors(&and_ors)
+            .ok_or_else(|| ParseFailure::Error(ParseError::unexpected_end_of_input(["and_or"])))?;
+        self.build_list(and_ors, span)
+    }
+
+    fn parse_separator_nonterminal(&mut self, _stop: StopSet) -> ParseResult<bool> {
+        if self.peek_is_separator_op()? {
+            let _separator = self.parse_separator_op_token()?.ok_or_else(|| {
+                ParseFailure::Error(ParseError::unexpected_end_of_input(["separator"]))
+            })?;
+            self.parse_linebreak()?;
+            return Ok(true);
+        }
+
+        Ok(self.parse_newline_list()? > 0)
+    }
+
+    fn parse_redirect_list_nonterminal(&mut self) -> ParseResult<Vec<RedirectAst>> {
+        let mut redirects = Vec::new();
+        while self.can_start_io_redirect_at(0)? {
+            redirects.push(self.parse_io_redirect_nonterminal()?);
+        }
+        Ok(redirects)
+    }
+
+    fn parse_name_word_nonterminal(&mut self) -> ParseResult<WordAst> {
+        let token = self
+            .peek_token(0)?
+            .ok_or_else(|| ParseFailure::Error(ParseError::unexpected_end_of_input(["NAME"])))?;
+        if token.kind != TokenKind::Token {
+            return Err(ParseFailure::Error(ParseError::unexpected_token(
+                &token,
+                ["NAME"],
+            )));
+        }
+
+        let classified = self.classify_token_at(
+            0,
+            ClassificationContext {
+                reserved_word_policy: ReservedWordPolicy::None,
+                name_context: NameContext::ForName,
+                ..Default::default()
+            },
+        )?;
+        if classified != ClassifiedTokenKind::Name {
+            return Err(ParseFailure::Error(ParseError::unexpected_token(
+                &token,
+                ["NAME"],
+            )));
+        }
+
+        let token = self
+            .next_token()?
+            .ok_or_else(|| ParseFailure::Error(ParseError::unexpected_end_of_input(["NAME"])))?;
+        self.build_word(token)
+    }
+
+    fn parse_plain_word_nonterminal(&mut self) -> ParseResult<WordAst> {
+        let token = self
+            .next_token()?
+            .ok_or_else(|| ParseFailure::Error(ParseError::unexpected_end_of_input(["WORD"])))?;
+        if token.kind != TokenKind::Token {
+            return Err(ParseFailure::Error(ParseError::unexpected_token(
+                &token,
+                ["WORD"],
+            )));
+        }
+        self.build_word(token)
+    }
+
+    fn parse_wordlist_nonterminal(&mut self) -> ParseResult<Vec<WordAst>> {
+        let mut words = Vec::new();
+        loop {
+            let Some(token) = self.peek_token(0)? else {
+                break;
+            };
+
+            if token.kind != TokenKind::Token {
+                break;
+            }
+            if self.peek_reserved_word(ReservedWordPolicy::InOrDo)? == Some(ReservedWord::Do) {
+                break;
+            }
+            words.push(self.parse_plain_word_nonterminal()?);
+        }
+
+        if words.is_empty() {
+            let found = self.peek_token(0)?.ok_or_else(|| {
+                ParseFailure::Error(ParseError::unexpected_end_of_input(["WORD"]))
+            })?;
+            return Err(ParseFailure::Error(ParseError::unexpected_token(
+                &found,
+                ["WORD"],
+            )));
+        }
+
+        Ok(words)
+    }
+
+    fn consume_plain_token(&mut self, lexeme: &'static str) -> ParseResult<Token> {
+        let token = self
+            .next_token()?
+            .ok_or_else(|| ParseFailure::Error(ParseError::unexpected_end_of_input([lexeme])))?;
+        if token.kind == TokenKind::Token && token.is_plain() && token.lexeme == lexeme {
+            Ok(token)
+        } else {
+            Err(ParseFailure::Error(ParseError::unexpected_token(
+                &token,
+                [lexeme],
+            )))
+        }
+    }
+
+    fn peek_reserved_word(
+        &mut self,
+        policy: ReservedWordPolicy,
+    ) -> ParseResult<Option<ReservedWord>> {
+        let Some(token) = self.peek_token(0)? else {
+            return Ok(None);
+        };
+        if token.kind != TokenKind::Token {
+            return Ok(None);
+        }
+
+        let classified = self.classify_token_at(
+            0,
+            ClassificationContext {
+                reserved_word_policy: policy,
+                ..Default::default()
+            },
+        )?;
+        match classified {
+            ClassifiedTokenKind::ReservedWord(word) => Ok(Some(word)),
+            _ => Ok(None),
+        }
+    }
+
+    fn consume_reserved_word(
+        &mut self,
+        expected: ReservedWord,
+        policy: ReservedWordPolicy,
+    ) -> ParseResult<Token> {
+        if self.peek_reserved_word(policy)? != Some(expected) {
+            let Some(found) = self.peek_token(0)? else {
+                return Err(ParseFailure::Error(ParseError::unexpected_end_of_input([
+                    reserved_word_label(expected),
+                ])));
+            };
+            return Err(ParseFailure::Error(ParseError::unexpected_token(
+                &found,
+                [reserved_word_label(expected)],
+            )));
+        }
+
+        self.next_token()?.ok_or_else(|| {
+            ParseFailure::Error(ParseError::unexpected_end_of_input([reserved_word_label(
+                expected,
+            )]))
+        })
+    }
+
+    fn at_compound_stop(&mut self, stop: StopSet) -> ParseResult<bool> {
+        let Some(token) = self.peek_token(0)? else {
+            return Ok(false);
+        };
+
+        match token.kind {
+            TokenKind::Operator(kind) => Ok((stop.right_paren && kind == OperatorKind::RightParen)
+                || (stop.case_terminators
+                    && matches!(
+                        kind,
+                        OperatorKind::DoubleSemicolon | OperatorKind::SemicolonAmpersand
+                    ))),
+            TokenKind::Newline => Ok(false),
+            TokenKind::Token => {
+                if stop.right_brace && is_plain_brace_close_token(&token) {
+                    return Ok(true);
+                }
+
+                Ok(self
+                    .peek_reserved_word(ReservedWordPolicy::Any)?
+                    .is_some_and(|word| stop.matches_reserved(word)))
+            }
+        }
     }
 
     fn parse_simple_command_nonterminal(&mut self) -> ParseResult<SimpleCommandAst> {
@@ -333,13 +826,6 @@ impl<'a> Parser<'a> {
                 TokenKind::Operator(kind) => {
                     if is_command_delimiter_operator(kind) {
                         break;
-                    }
-
-                    if kind == OperatorKind::LeftParen {
-                        return Err(ParseFailure::Error(ParseError::grammar_not_implemented(
-                            Some(next.span),
-                            Some(next.lexeme),
-                        )));
                     }
 
                     if is_redirect_operator(kind) {
@@ -725,6 +1211,131 @@ impl<'a> Parser<'a> {
             .map_err(ParseFailure::Error)
     }
 
+    fn build_case_item(
+        &mut self,
+        patterns: Vec<WordAst>,
+        body: Option<ListAst>,
+        terminator: Option<CaseTerminatorAst>,
+        span: Span,
+    ) -> ParseResult<CaseItemAst> {
+        let mut builder = AstBuilder::new(&mut self.arena);
+        builder
+            .case_item(patterns, body, terminator, span)
+            .map_err(ParseFailure::Error)
+    }
+
+    fn build_if_clause(
+        &mut self,
+        condition: ListAst,
+        then_body: ListAst,
+        elif_arms: Vec<(ListAst, ListAst)>,
+        else_body: Option<ListAst>,
+        span: Span,
+    ) -> ParseResult<IfClauseAst> {
+        let mut builder = AstBuilder::new(&mut self.arena);
+        builder
+            .if_clause(condition, then_body, elif_arms, else_body, span)
+            .map_err(ParseFailure::Error)
+    }
+
+    fn build_for_clause(
+        &mut self,
+        name: WordAst,
+        words: Vec<WordAst>,
+        body: ListAst,
+        span: Span,
+    ) -> ParseResult<ForClauseAst> {
+        let mut builder = AstBuilder::new(&mut self.arena);
+        builder
+            .for_clause(name, words, body, span)
+            .map_err(ParseFailure::Error)
+    }
+
+    fn build_while_clause(
+        &mut self,
+        condition: ListAst,
+        body: ListAst,
+        span: Span,
+    ) -> ParseResult<WhileClauseAst> {
+        let mut builder = AstBuilder::new(&mut self.arena);
+        builder
+            .while_clause(condition, body, span)
+            .map_err(ParseFailure::Error)
+    }
+
+    fn build_until_clause(
+        &mut self,
+        condition: ListAst,
+        body: ListAst,
+        span: Span,
+    ) -> ParseResult<UntilClauseAst> {
+        let mut builder = AstBuilder::new(&mut self.arena);
+        builder
+            .until_clause(condition, body, span)
+            .map_err(ParseFailure::Error)
+    }
+
+    fn build_case_clause(
+        &mut self,
+        word: WordAst,
+        items: Vec<CaseItemAst>,
+        span: Span,
+    ) -> ParseResult<CaseClauseAst> {
+        let mut builder = AstBuilder::new(&mut self.arena);
+        builder
+            .case_clause(word, items, span)
+            .map_err(ParseFailure::Error)
+    }
+
+    fn build_compound_subshell(&mut self, list: ListAst) -> ParseResult<CompoundCommandAst> {
+        let mut builder = AstBuilder::new(&mut self.arena);
+        builder.compound_subshell(list).map_err(ParseFailure::Error)
+    }
+
+    fn build_compound_brace_group(&mut self, list: ListAst) -> ParseResult<CompoundCommandAst> {
+        let mut builder = AstBuilder::new(&mut self.arena);
+        builder
+            .compound_brace_group(list)
+            .map_err(ParseFailure::Error)
+    }
+
+    fn build_compound_if(&mut self, clause: IfClauseAst) -> ParseResult<CompoundCommandAst> {
+        let mut builder = AstBuilder::new(&mut self.arena);
+        builder.compound_if(clause).map_err(ParseFailure::Error)
+    }
+
+    fn build_compound_for(&mut self, clause: ForClauseAst) -> ParseResult<CompoundCommandAst> {
+        let mut builder = AstBuilder::new(&mut self.arena);
+        builder.compound_for(clause).map_err(ParseFailure::Error)
+    }
+
+    fn build_compound_while(&mut self, clause: WhileClauseAst) -> ParseResult<CompoundCommandAst> {
+        let mut builder = AstBuilder::new(&mut self.arena);
+        builder.compound_while(clause).map_err(ParseFailure::Error)
+    }
+
+    fn build_compound_until(&mut self, clause: UntilClauseAst) -> ParseResult<CompoundCommandAst> {
+        let mut builder = AstBuilder::new(&mut self.arena);
+        builder.compound_until(clause).map_err(ParseFailure::Error)
+    }
+
+    fn build_compound_case(&mut self, clause: CaseClauseAst) -> ParseResult<CompoundCommandAst> {
+        let mut builder = AstBuilder::new(&mut self.arena);
+        builder.compound_case(clause).map_err(ParseFailure::Error)
+    }
+
+    fn build_compound_command_node(
+        &mut self,
+        kind: CompoundCommandAst,
+        redirects: Vec<RedirectAst>,
+        span: Span,
+    ) -> ParseResult<CompoundCommandNodeAst> {
+        let mut builder = AstBuilder::new(&mut self.arena);
+        builder
+            .compound_command_node(kind, redirects, span)
+            .map_err(ParseFailure::Error)
+    }
+
     fn build_simple_command(
         &mut self,
         assignments: Vec<AssignmentWordAst>,
@@ -741,6 +1352,16 @@ impl<'a> Parser<'a> {
     fn build_command_simple(&mut self, command: SimpleCommandAst) -> ParseResult<CommandAst> {
         let mut builder = AstBuilder::new(&mut self.arena);
         builder.command_simple(command).map_err(ParseFailure::Error)
+    }
+
+    fn build_command_compound(
+        &mut self,
+        command: CompoundCommandNodeAst,
+    ) -> ParseResult<CommandAst> {
+        let mut builder = AstBuilder::new(&mut self.arena);
+        builder
+            .command_compound(command)
+            .map_err(ParseFailure::Error)
     }
 
     fn build_pipeline(
@@ -817,6 +1438,114 @@ enum ParseFailure {
     Error(ParseError),
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct StopSet {
+    right_paren: bool,
+    right_brace: bool,
+    then_kw: bool,
+    do_kw: bool,
+    done_kw: bool,
+    fi_kw: bool,
+    esac_kw: bool,
+    else_kw: bool,
+    elif_kw: bool,
+    case_terminators: bool,
+}
+
+impl StopSet {
+    const fn right_paren() -> Self {
+        Self {
+            right_paren: true,
+            ..Self::empty()
+        }
+    }
+
+    const fn right_brace() -> Self {
+        Self {
+            right_brace: true,
+            ..Self::empty()
+        }
+    }
+
+    const fn then_only() -> Self {
+        Self {
+            then_kw: true,
+            ..Self::empty()
+        }
+    }
+
+    const fn do_only() -> Self {
+        Self {
+            do_kw: true,
+            ..Self::empty()
+        }
+    }
+
+    const fn done_only() -> Self {
+        Self {
+            done_kw: true,
+            ..Self::empty()
+        }
+    }
+
+    const fn fi_only() -> Self {
+        Self {
+            fi_kw: true,
+            ..Self::empty()
+        }
+    }
+
+    const fn else_elif_fi() -> Self {
+        Self {
+            else_kw: true,
+            elif_kw: true,
+            fi_kw: true,
+            ..Self::empty()
+        }
+    }
+
+    const fn case_item_body() -> Self {
+        Self {
+            esac_kw: true,
+            case_terminators: true,
+            ..Self::empty()
+        }
+    }
+
+    const fn empty() -> Self {
+        Self {
+            right_paren: false,
+            right_brace: false,
+            then_kw: false,
+            do_kw: false,
+            done_kw: false,
+            fi_kw: false,
+            esac_kw: false,
+            else_kw: false,
+            elif_kw: false,
+            case_terminators: false,
+        }
+    }
+
+    const fn matches_reserved(self, word: ReservedWord) -> bool {
+        match word {
+            ReservedWord::Then => self.then_kw,
+            ReservedWord::Do => self.do_kw,
+            ReservedWord::Done => self.done_kw,
+            ReservedWord::Fi => self.fi_kw,
+            ReservedWord::Esac => self.esac_kw,
+            ReservedWord::Else => self.else_kw,
+            ReservedWord::Elif => self.elif_kw,
+            ReservedWord::If
+            | ReservedWord::Case
+            | ReservedWord::While
+            | ReservedWord::Until
+            | ReservedWord::For
+            | ReservedWord::In => false,
+        }
+    }
+}
+
 fn delimiter_context_from_token(token: &Token) -> Option<DelimiterContext> {
     match token.kind {
         TokenKind::Operator(kind) => kind.delimiter_context(),
@@ -864,12 +1593,7 @@ fn is_unimplemented_command_operator(kind: OperatorKind) -> bool {
 fn is_unimplemented_reserved(word: ReservedWord) -> bool {
     matches!(
         word,
-        ReservedWord::If
-            | ReservedWord::For
-            | ReservedWord::Case
-            | ReservedWord::While
-            | ReservedWord::Until
-            | ReservedWord::Do
+        ReservedWord::Do
             | ReservedWord::Done
             | ReservedWord::Then
             | ReservedWord::Else
@@ -904,9 +1628,7 @@ fn span_of_command(command: &CommandAst) -> Span {
             .span
             .or_else(|| span_of_simple_command(simple))
             .expect("simple command must have a span"),
-        CommandAst::Compound(_) => {
-            panic!("compound commands are not produced in phase 4")
-        }
+        CommandAst::Compound(compound) => compound.span,
         CommandAst::FunctionDefinition(function) => function.span,
     }
 }
@@ -985,5 +1707,31 @@ fn extend_span_bounds(span: Span, start: &mut Option<Span>, end: &mut Option<Spa
             }
         }
         None => *end = Some(span),
+    }
+}
+
+fn is_plain_brace_open_token(token: &Token) -> bool {
+    token.kind == TokenKind::Token && token.is_plain() && token.lexeme == "{"
+}
+
+fn is_plain_brace_close_token(token: &Token) -> bool {
+    token.kind == TokenKind::Token && token.is_plain() && token.lexeme == "}"
+}
+
+fn reserved_word_label(word: ReservedWord) -> &'static str {
+    match word {
+        ReservedWord::If => "if",
+        ReservedWord::Then => "then",
+        ReservedWord::Else => "else",
+        ReservedWord::Elif => "elif",
+        ReservedWord::Fi => "fi",
+        ReservedWord::Do => "do",
+        ReservedWord::Done => "done",
+        ReservedWord::Case => "case",
+        ReservedWord::Esac => "esac",
+        ReservedWord::While => "while",
+        ReservedWord::Until => "until",
+        ReservedWord::For => "for",
+        ReservedWord::In => "in",
     }
 }

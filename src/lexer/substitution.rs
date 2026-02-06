@@ -686,18 +686,18 @@ fn scan_backquoted_substitution(
     let mut state = SubstitutionQuoteState::default();
 
     while !cursor.is_eof(input) {
-        if state.can_start_substitution() {
-            if let Some(scan) = try_scan_dollar(
+        if state.can_start_substitution()
+            && let Some(scan) = try_scan_dollar(
                 cursor,
                 input,
                 token_bytes,
                 nested_markers,
                 depth + 1,
                 max_token_bytes,
-            )? {
-                nested_markers.push(marker_from_scan(scan));
-                continue;
-            }
+            )?
+        {
+            nested_markers.push(marker_from_scan(scan));
+            continue;
         }
 
         let byte = cursor

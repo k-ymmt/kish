@@ -7,6 +7,7 @@ pub mod arena;
 pub mod ast;
 pub mod classifier;
 pub mod error;
+#[allow(clippy::module_inception)]
 pub mod parser;
 pub mod recovery;
 pub mod token_stream;

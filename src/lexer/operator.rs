@@ -82,7 +82,7 @@ fn match_operator_at(input: &str, offset: ByteOffset) -> Option<(OperatorKind, &
         }
     }
 
-    let matched = match tail[0] {
+    match tail[0] {
         b'|' => Some((OperatorKind::Pipe, "|")),
         b';' => Some((OperatorKind::Semicolon, ";")),
         b'&' => Some((OperatorKind::Ampersand, "&")),
@@ -91,6 +91,5 @@ fn match_operator_at(input: &str, offset: ByteOffset) -> Option<(OperatorKind, &
         b'<' => Some((OperatorKind::Less, "<")),
         b'>' => Some((OperatorKind::Greater, ">")),
         _ => None,
-    };
-    matched
+    }
 }

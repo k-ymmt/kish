@@ -160,43 +160,42 @@ impl AliasExpander {
             if allow_alias
                 && self.is_alias_candidate_token(token)
                 && self.is_valid_alias_name(&token.lexeme)
+                && let Some(alias_value) = self.aliases.get(&token.lexeme)
             {
-                if let Some(alias_value) = self.aliases.get(&token.lexeme) {
-                    let alias_name = token.lexeme.clone();
+                let alias_name = token.lexeme.clone();
 
-                    if !active_aliases.iter().any(|active| active == &alias_name) {
-                        if active_aliases.len() >= self.options.max_expansion_depth {
-                            return Err(AliasExpansionError::ExpansionDepthExceeded {
-                                alias_name,
-                                limit: self.options.max_expansion_depth,
-                            });
-                        }
-
-                        active_aliases.push(alias_name.clone());
-                        let synthetic_source_id = SourceId::new(*next_synthetic_source_id);
-                        *next_synthetic_source_id = next_synthetic_source_id.saturating_add(1);
-
-                        let alias_tokens = self.retokenize_alias_value(
-                            alias_value,
-                            &alias_name,
-                            token.span,
-                            synthetic_source_id,
-                        )?;
-                        let nested = self.expand_stream(
-                            &alias_tokens,
-                            true,
-                            active_aliases,
-                            next_synthetic_source_id,
-                        )?;
-                        let _ = active_aliases.pop();
-
-                        output.extend(nested.tokens);
-                        command_position = nested.command_position;
-                        if self.options.allow_trailing_blank && ends_with_blank(alias_value) {
-                            alias_continuation = true;
-                        }
-                        continue;
+                if !active_aliases.iter().any(|active| active == &alias_name) {
+                    if active_aliases.len() >= self.options.max_expansion_depth {
+                        return Err(AliasExpansionError::ExpansionDepthExceeded {
+                            alias_name,
+                            limit: self.options.max_expansion_depth,
+                        });
                     }
+
+                    active_aliases.push(alias_name.clone());
+                    let synthetic_source_id = SourceId::new(*next_synthetic_source_id);
+                    *next_synthetic_source_id = next_synthetic_source_id.saturating_add(1);
+
+                    let alias_tokens = self.retokenize_alias_value(
+                        alias_value,
+                        &alias_name,
+                        token.span,
+                        synthetic_source_id,
+                    )?;
+                    let nested = self.expand_stream(
+                        &alias_tokens,
+                        true,
+                        active_aliases,
+                        next_synthetic_source_id,
+                    )?;
+                    let _ = active_aliases.pop();
+
+                    output.extend(nested.tokens);
+                    command_position = nested.command_position;
+                    if self.options.allow_trailing_blank && ends_with_blank(alias_value) {
+                        alias_continuation = true;
+                    }
+                    continue;
                 }
             }
 

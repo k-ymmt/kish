@@ -52,6 +52,7 @@ impl<'a> TokenStream<'a> {
     }
 
     /// Consumes and returns the next token from the stream.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<Token>, TokenStreamError> {
         self.fill_to(0)?;
         Ok(self.lookahead.pop_front())

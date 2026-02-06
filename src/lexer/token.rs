@@ -130,18 +130,10 @@ pub enum ParserTokenClass {
 }
 
 /// Options for parser-side lexical post-classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct ParserClassificationOptions {
     /// Enables optional `IO_LOCATION` conversion.
     pub allow_io_location: bool,
-}
-
-impl Default for ParserClassificationOptions {
-    fn default() -> Self {
-        Self {
-            allow_io_location: false,
-        }
-    }
 }
 
 /// Token-relative byte offset.

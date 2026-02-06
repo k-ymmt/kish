@@ -541,21 +541,21 @@ impl<'a> Lexer<'a> {
         loop {
             match self.scan_next_token_raw()? {
                 LexStep::Token(token) => {
-                    if let Some((strip_tabs, operator_span)) = expecting_delimiter {
-                        if token.kind == TokenKind::Token {
-                            self.pending_heredocs.push_back(derive_delimiter_spec(
-                                operator_span,
-                                &token,
-                                strip_tabs,
-                            ));
-                            expecting_delimiter = None;
-                        }
+                    if let Some((strip_tabs, operator_span)) = expecting_delimiter
+                        && token.kind == TokenKind::Token
+                    {
+                        self.pending_heredocs.push_back(derive_delimiter_spec(
+                            operator_span,
+                            &token,
+                            strip_tabs,
+                        ));
+                        expecting_delimiter = None;
                     }
 
-                    if let TokenKind::Operator(kind) = token.kind {
-                        if is_io_here_operator(kind) {
-                            expecting_delimiter = Some((is_strip_tabs_operator(kind), token.span));
-                        }
+                    if let TokenKind::Operator(kind) = token.kind
+                        && is_io_here_operator(kind)
+                    {
+                        expecting_delimiter = Some((is_strip_tabs_operator(kind), token.span));
                     }
 
                     saw_newline = token.kind == TokenKind::Newline;
@@ -608,7 +608,7 @@ impl<'a> Lexer<'a> {
                     break (self.cursor.offset(), false);
                 }
 
-                let candidate = line_for_match(&line);
+                let candidate = line_for_match(line);
                 let candidate = if spec.strip_tabs {
                     strip_tabs_for_match(candidate)
                 } else {
@@ -620,7 +620,7 @@ impl<'a> Lexer<'a> {
                 }
 
                 let addition = if spec.strip_tabs {
-                    strip_tabs_for_storage(&line)
+                    strip_tabs_for_storage(line)
                 } else {
                     line
                 };

@@ -58,9 +58,10 @@ impl ReservedWord {
 }
 
 /// Reserved-word recognition policy for a grammar position.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ReservedWordPolicy {
     /// Reserved words are not recognized in this position.
+    #[default]
     None,
     /// Any reserved word can be recognized.
     Any,
@@ -72,27 +73,16 @@ pub enum ReservedWordPolicy {
     InOrDo,
 }
 
-impl Default for ReservedWordPolicy {
-    fn default() -> Self {
-        Self::None
-    }
-}
-
 /// Name classification mode for context-sensitive grammar rules.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum NameContext {
     /// Name conversion is disabled.
+    #[default]
     None,
     /// Rule 5 name conversion (`for` loop variable).
     ForName,
     /// Rule 8 name conversion (`fname` in function definition).
     FunctionName,
-}
-
-impl Default for NameContext {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 /// Parser-controlled context for token reclassification.

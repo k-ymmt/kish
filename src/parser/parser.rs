@@ -1152,10 +1152,10 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_separator_op(&mut self) -> ParseResult<Option<OperatorKind>> {
-        Ok(self
+        self
             .parse_separator_op_token()?
             .map(|token| expect_operator_kind(&token, "separator operator"))
-            .transpose()?)
+            .transpose()
     }
 
     #[allow(dead_code)]

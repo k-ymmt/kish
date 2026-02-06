@@ -1,6 +1,7 @@
 use kish::lexer::{Lexer, LexerMode, SourceId};
 use kish::parser::{
-    NeedMoreInputReason, ParseErrorKind, ParseOptions, ParseStep, Parser, TokenStream,
+    CommandAst, CompleteCommandAst, NeedMoreInputReason, ParseErrorKind, ParseOptions, ParseStep,
+    Parser, TokenStream,
 };
 
 fn parser_for(input: &str, options: ParseOptions) -> Parser<'_> {
@@ -24,6 +25,23 @@ fn parse_need_more_reason(input: &str) -> NeedMoreInputReason {
         panic!("expected ParseStep::NeedMoreInput, got {step:?}");
     };
     reason
+}
+
+fn first_command(step: &ParseStep) -> &CommandAst {
+    let ParseStep::Complete(complete) = step else {
+        panic!("expected ParseStep::Complete, got {step:?}");
+    };
+    let and_or = complete.list.and_ors.first().expect("and_or should exist");
+    and_or.head.commands.first().expect("command should exist")
+}
+
+fn first_simple_word_lexeme(complete: &CompleteCommandAst) -> &str {
+    let and_or = complete.list.and_ors.first().expect("and_or should exist");
+    let command = and_or.head.commands.first().expect("command should exist");
+    match command {
+        CommandAst::Simple(simple) => simple.words[0].token.lexeme.as_str(),
+        other => panic!("expected simple command, got {other:?}"),
+    }
 }
 
 #[test]
@@ -139,4 +157,171 @@ fn non_interactive_incomplete_constructs_still_return_unexpected_end_of_input() 
             "input: {input}"
         );
     }
+}
+
+#[test]
+fn boundary_preserves_following_command_after_trailing_semicolon_newline() {
+    let mut parser = parser_for("a;\nb\n", ParseOptions::default());
+
+    let first = parser
+        .parse_complete_command()
+        .expect("first command should parse");
+    let second = parser
+        .parse_complete_command()
+        .expect("second command should parse");
+    let third = parser
+        .parse_complete_command()
+        .expect("third call should return end of input");
+
+    let ParseStep::Complete(first_complete) = first else {
+        panic!("expected first step to be complete");
+    };
+    assert_eq!(
+        first_complete.separator_op,
+        Some(kish::lexer::OperatorKind::Semicolon)
+    );
+    let ParseStep::Complete(second_complete) = second else {
+        panic!("expected second step to be complete");
+    };
+    assert_eq!(first_simple_word_lexeme(&second_complete), "b");
+    assert_eq!(third, ParseStep::EndOfInput);
+}
+
+#[test]
+fn boundary_preserves_following_command_after_trailing_ampersand_newline() {
+    let mut parser = parser_for("a&\nb\n", ParseOptions::default());
+
+    let first = parser
+        .parse_complete_command()
+        .expect("first command should parse");
+    let second = parser
+        .parse_complete_command()
+        .expect("second command should parse");
+
+    let ParseStep::Complete(first_complete) = first else {
+        panic!("expected first step to be complete");
+    };
+    assert_eq!(
+        first_complete.separator_op,
+        Some(kish::lexer::OperatorKind::Ampersand)
+    );
+    let ParseStep::Complete(second_complete) = second else {
+        panic!("expected second step to be complete");
+    };
+    assert_eq!(first_simple_word_lexeme(&second_complete), "b");
+}
+
+#[test]
+fn boundary_keeps_second_command_after_function_definition() {
+    let mut parser = parser_for("foo() { echo x; }\necho y\n", ParseOptions::default());
+
+    let first = parser
+        .parse_complete_command()
+        .expect("function definition should parse");
+    let second = parser
+        .parse_complete_command()
+        .expect("following command should parse");
+
+    assert!(matches!(first_command(&first), CommandAst::FunctionDefinition(_)));
+    let ParseStep::Complete(second_complete) = second else {
+        panic!("expected second step to be complete");
+    };
+    assert_eq!(first_simple_word_lexeme(&second_complete), "echo");
+}
+
+#[test]
+fn boundary_stepping_is_stable_with_leading_and_trailing_blank_lines() {
+    let mut parser = parser_for("\n\nalpha\nbeta\n\n", ParseOptions::default());
+
+    let first = parser
+        .parse_complete_command()
+        .expect("first command should parse");
+    let second = parser
+        .parse_complete_command()
+        .expect("second command should parse");
+    let third = parser
+        .parse_complete_command()
+        .expect("third call should return end");
+
+    let ParseStep::Complete(first_complete) = first else {
+        panic!("expected first step to be complete");
+    };
+    assert_eq!(first_simple_word_lexeme(&first_complete), "alpha");
+    let ParseStep::Complete(second_complete) = second else {
+        panic!("expected second step to be complete");
+    };
+    assert_eq!(first_simple_word_lexeme(&second_complete), "beta");
+    assert_eq!(third, ParseStep::EndOfInput);
+}
+
+#[test]
+fn mixed_validity_interactive_returns_complete_then_need_more() {
+    let mut parser = parser_for(
+        "echo ok\n\"unterminated",
+        ParseOptions {
+            interactive: true,
+            ..Default::default()
+        },
+    );
+
+    let first = parser
+        .parse_complete_command()
+        .expect("first command should parse");
+    let second = parser
+        .parse_complete_command()
+        .expect("interactive mode should request continuation");
+
+    assert!(matches!(first, ParseStep::Complete(_)));
+    assert_eq!(
+        second,
+        ParseStep::NeedMoreInput(NeedMoreInputReason::UnterminatedDoubleQuote)
+    );
+}
+
+#[test]
+fn mixed_validity_non_interactive_returns_complete_then_error() {
+    let mut parser = parser_for("echo ok\n\"unterminated", ParseOptions::default());
+
+    let first = parser
+        .parse_complete_command()
+        .expect("first command should parse");
+    let second = parser
+        .parse_complete_command()
+        .expect_err("second command should fail");
+
+    assert!(matches!(first, ParseStep::Complete(_)));
+    assert_eq!(second.kind, ParseErrorKind::UnexpectedEndOfInput);
+}
+
+#[test]
+fn parse_complete_command_sequence_matches_parse_program_order() {
+    let input = "alpha\nbeta\ngamma\n";
+
+    let mut incremental = parser_for(input, ParseOptions::default());
+    let mut incremental_words = Vec::new();
+    loop {
+        let step = incremental
+            .parse_complete_command()
+            .expect("incremental parsing should succeed");
+        match step {
+            ParseStep::Complete(complete) => {
+                incremental_words.push(first_simple_word_lexeme(&complete).to_string());
+            }
+            ParseStep::EndOfInput => break,
+            ParseStep::NeedMoreInput(reason) => {
+                panic!("did not expect need-more-input for complete script: {reason:?}")
+            }
+        }
+    }
+
+    let mut whole = parser_for(input, ParseOptions::default());
+    let program = whole.parse_program().expect("program parsing should succeed");
+    let program_words: Vec<String> = program
+        .complete_commands
+        .iter()
+        .map(|complete| first_simple_word_lexeme(complete).to_string())
+        .collect();
+
+    assert_eq!(incremental_words, program_words);
+    assert_eq!(incremental_words, vec!["alpha", "beta", "gamma"]);
 }

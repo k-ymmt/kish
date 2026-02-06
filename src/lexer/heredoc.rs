@@ -11,16 +11,21 @@ pub(crate) struct PendingHereDocSpec {
     pub(crate) delimiter_key: String,
     pub(crate) strip_tabs: bool,
     pub(crate) quoted: bool,
-    pub(crate) source_span: Span,
+    pub(crate) operator_span: Span,
+    pub(crate) delimiter_span: Span,
 }
 
 /// Captured body payload for one here-document.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HereDocBodyCapture {
-    pub(crate) spec_index: usize,
-    pub(crate) start: ByteOffset,
-    pub(crate) end: ByteOffset,
-    pub(crate) raw_body: String,
+pub struct HereDocBodyCapture {
+    pub origin_operator_span: Span,
+    pub delimiter_span: Span,
+    pub body_span: Span,
+    pub raw_delimiter: String,
+    pub delimiter_key: String,
+    pub strip_tabs: bool,
+    pub quoted: bool,
+    pub raw_body: String,
 }
 
 /// Returns true when operator kind is an io_here form.
@@ -39,13 +44,18 @@ pub(crate) fn strip_tabs_for_match(line: &str) -> &str {
 }
 
 /// Produces a pending here-doc spec from the delimiter token.
-pub(crate) fn derive_delimiter_spec(token: &Token, strip_tabs: bool) -> PendingHereDocSpec {
+pub(crate) fn derive_delimiter_spec(
+    operator_span: Span,
+    token: &Token,
+    strip_tabs: bool,
+) -> PendingHereDocSpec {
     PendingHereDocSpec {
         raw_delimiter: token.lexeme.clone(),
         delimiter_key: quote_remove_delimiter(&token.lexeme, &token.quote_markers),
         strip_tabs,
         quoted: token.has_quote_markers(),
-        source_span: token.span,
+        operator_span,
+        delimiter_span: token.span,
     }
 }
 
@@ -122,23 +132,37 @@ pub(crate) fn quote_remove_delimiter(raw: &str, quote_markers: &[QuoteMarker]) -
     String::from_utf8(out).expect("input is valid UTF-8")
 }
 
+/// Creates a warning diagnostic for EOF-before-delimiter here-doc failures.
+pub(crate) fn delimiter_not_found_diagnostic(
+    source_id: SourceId,
+    spec: &PendingHereDocSpec,
+    end: ByteOffset,
+) -> LexDiagnostic {
+    LexDiagnostic::new(
+        DiagnosticCode::HereDocDelimiterNotFound,
+        format!(
+            "here-document delimiter `{}` was not found before end of input",
+            spec.delimiter_key
+        ),
+        Span::new(source_id, spec.delimiter_span.start, end),
+    )
+}
+
 /// Creates a fatal error for EOF-before-delimiter here-doc failures.
 pub(crate) fn delimiter_not_found_error(
     source_id: SourceId,
     spec: &PendingHereDocSpec,
     end: ByteOffset,
 ) -> FatalLexError {
-    FatalLexError::HereDocDelimiterNotFound(LexDiagnostic::new(
-        DiagnosticCode::HereDocDelimiterNotFound,
-        format!(
-            "here-document delimiter `{}` was not found before end of input",
-            spec.delimiter_key
-        ),
-        Span::new(source_id, spec.source_span.start, end),
-    ))
+    FatalLexError::HereDocDelimiterNotFound(delimiter_not_found_diagnostic(source_id, spec, end))
 }
 
 /// Returns line contents without trailing newline for delimiter matching.
 pub(crate) fn line_for_match(line: &str) -> &str {
     line.strip_suffix('\n').unwrap_or(line)
+}
+
+/// Removes leading tabs for stored here-doc body lines (`<<-` semantics).
+pub(crate) fn strip_tabs_for_storage(line: &str) -> &str {
+    line.trim_start_matches('\t')
 }

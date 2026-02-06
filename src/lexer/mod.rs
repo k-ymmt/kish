@@ -18,8 +18,9 @@ mod substitution;
 
 use crate::lexer::cursor::Cursor;
 use crate::lexer::heredoc::{
-    HereDocBodyCapture, PendingHereDocSpec, delimiter_not_found_error, derive_delimiter_spec,
-    is_io_here_operator, is_strip_tabs_operator, line_for_match, strip_tabs_for_match,
+    PendingHereDocSpec, delimiter_not_found_diagnostic, delimiter_not_found_error,
+    derive_delimiter_spec, is_io_here_operator, is_strip_tabs_operator, line_for_match,
+    strip_tabs_for_match, strip_tabs_for_storage,
 };
 use crate::lexer::operator::{has_operator_prefix, scan_operator};
 use crate::lexer::quote::{
@@ -33,8 +34,10 @@ use crate::lexer::substitution::{
     try_scan_backquote, try_scan_dollar,
 };
 use std::collections::VecDeque;
+use std::mem;
 
 pub use diagnostics::{DiagnosticCode, FatalLexError, LexDiagnostic, RecoverableLexError};
+pub use heredoc::HereDocBodyCapture;
 pub use span::{ByteOffset, SourceId, Span};
 pub use token::{
     BoundaryResult, CompleteCommandTokens, LexStep, NeedMoreInput, NeedMoreReason, OperatorKind,
@@ -55,6 +58,30 @@ pub enum LexerMode {
     HereDocBody,
 }
 
+/// EOF policy for here-document body scanning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HereDocEofPolicy {
+    /// Emit a fatal lexical error when delimiter is not found before EOF.
+    StrictError,
+    /// Record a warning and keep any partial body collected before EOF.
+    Warning,
+}
+
+/// Configuration options for lexer behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LexerOptions {
+    /// EOF policy for here-document body scanning.
+    pub here_doc_eof_policy: HereDocEofPolicy,
+}
+
+impl Default for LexerOptions {
+    fn default() -> Self {
+        Self {
+            here_doc_eof_policy: HereDocEofPolicy::StrictError,
+        }
+    }
+}
+
 /// A POSIX-first lexer with placeholder scanning behavior.
 ///
 /// Phase 5 behavior:
@@ -68,28 +95,57 @@ pub struct Lexer<'a> {
     mode: LexerMode,
     source_id: SourceId,
     cursor: Cursor,
+    options: LexerOptions,
     pending_heredocs: VecDeque<PendingHereDocSpec>,
     replay_tokens: VecDeque<Token>,
     collected_heredoc_bodies: Vec<HereDocBodyCapture>,
+    warnings: Vec<LexDiagnostic>,
 }
 
 impl<'a> Lexer<'a> {
     /// Creates a lexer for the provided input and mode.
     pub fn new(input: &'a str, mode: LexerMode) -> Self {
+        Self::with_options(input, mode, LexerOptions::default())
+    }
+
+    /// Creates a lexer with explicit options.
+    pub fn with_options(input: &'a str, mode: LexerMode, options: LexerOptions) -> Self {
         Self {
             input,
             mode,
             source_id: SourceId::new(0),
             cursor: Cursor::new(),
+            options,
             pending_heredocs: VecDeque::new(),
             replay_tokens: VecDeque::new(),
             collected_heredoc_bodies: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 
     /// Returns the current lexer mode.
     pub fn mode(&self) -> LexerMode {
         self.mode
+    }
+
+    /// Returns here-document body captures collected so far.
+    pub fn here_doc_bodies(&self) -> &[HereDocBodyCapture] {
+        &self.collected_heredoc_bodies
+    }
+
+    /// Drains and returns here-document body captures collected so far.
+    pub fn drain_here_doc_bodies(&mut self) -> Vec<HereDocBodyCapture> {
+        mem::take(&mut self.collected_heredoc_bodies)
+    }
+
+    /// Returns non-fatal lexer warnings collected so far.
+    pub fn warnings(&self) -> &[LexDiagnostic] {
+        &self.warnings
+    }
+
+    /// Drains and returns non-fatal lexer warnings collected so far.
+    pub fn drain_warnings(&mut self) -> Vec<LexDiagnostic> {
+        mem::take(&mut self.warnings)
     }
 
     /// Scans and returns the next lexical step.
@@ -347,17 +403,21 @@ impl<'a> Lexer<'a> {
         loop {
             match self.scan_next_token_raw()? {
                 LexStep::Token(token) => {
-                    if let Some(strip_tabs) = expecting_delimiter {
+                    if let Some((strip_tabs, operator_span)) = expecting_delimiter {
                         if token.kind == TokenKind::Token {
-                            self.pending_heredocs
-                                .push_back(derive_delimiter_spec(&token, strip_tabs));
+                            self.pending_heredocs.push_back(derive_delimiter_spec(
+                                operator_span,
+                                &token,
+                                strip_tabs,
+                            ));
                             expecting_delimiter = None;
                         }
                     }
 
                     if let TokenKind::Operator(kind) = token.kind {
                         if is_io_here_operator(kind) {
-                            expecting_delimiter = Some(is_strip_tabs_operator(kind));
+                            expecting_delimiter =
+                                Some((is_strip_tabs_operator(kind), token.span));
                         }
                     }
 
@@ -388,32 +448,27 @@ impl<'a> Lexer<'a> {
         Ok(LexStep::Token(replay))
     }
 
-    fn expected_heredoc_delimiter(token: &Token) -> Option<bool> {
+    fn expected_heredoc_delimiter(token: &Token) -> Option<(bool, Span)> {
         let TokenKind::Operator(kind) = token.kind else {
             return None;
         };
         if is_io_here_operator(kind) {
-            return Some(is_strip_tabs_operator(kind));
+            return Some((is_strip_tabs_operator(kind), token.span));
         }
         None
     }
 
     fn consume_pending_heredoc_bodies(&mut self) -> Result<(), FatalLexError> {
         while let Some(spec) = self.pending_heredocs.pop_front() {
-            let spec_index = self.collected_heredoc_bodies.len();
             let body_start = self.cursor.offset();
             let mut raw_body = String::new();
 
-            let body_end = loop {
+            let (body_end, found_delimiter) = loop {
                 let line_start = self.cursor.offset();
                 let (line, had_newline) = self.read_raw_line();
 
                 if line.is_empty() && !had_newline {
-                    return Err(delimiter_not_found_error(
-                        self.source_id,
-                        &spec,
-                        self.cursor.offset(),
-                    ));
+                    break (self.cursor.offset(), false);
                 }
 
                 let candidate = line_for_match(&line);
@@ -424,29 +479,81 @@ impl<'a> Lexer<'a> {
                 };
 
                 if candidate == spec.delimiter_key {
-                    break line_start;
+                    break (line_start, true);
                 }
 
-                raw_body.push_str(&line);
+                if spec.strip_tabs {
+                    raw_body.push_str(strip_tabs_for_storage(&line));
+                } else {
+                    raw_body.push_str(&line);
+                }
 
                 if !had_newline {
-                    return Err(delimiter_not_found_error(
-                        self.source_id,
-                        &spec,
-                        self.cursor.offset(),
-                    ));
+                    break (self.cursor.offset(), false);
                 }
             };
 
-            self.collected_heredoc_bodies.push(HereDocBodyCapture {
-                spec_index,
-                start: body_start,
-                end: body_end,
-                raw_body,
-            });
+            if found_delimiter {
+                self.collected_heredoc_bodies.push(HereDocBodyCapture {
+                    origin_operator_span: spec.operator_span,
+                    delimiter_span: spec.delimiter_span,
+                    body_span: Span::new(self.source_id, body_start, body_end),
+                    raw_delimiter: spec.raw_delimiter,
+                    delimiter_key: spec.delimiter_key,
+                    strip_tabs: spec.strip_tabs,
+                    quoted: spec.quoted,
+                    raw_body,
+                });
+                continue;
+            }
+
+            match self.options.here_doc_eof_policy {
+                HereDocEofPolicy::StrictError => {
+                    return Err(delimiter_not_found_error(self.source_id, &spec, body_end));
+                }
+                HereDocEofPolicy::Warning => {
+                    self.warnings.push(delimiter_not_found_diagnostic(
+                        self.source_id,
+                        &spec,
+                        body_end,
+                    ));
+                    self.collected_heredoc_bodies.push(HereDocBodyCapture {
+                        origin_operator_span: spec.operator_span,
+                        delimiter_span: spec.delimiter_span,
+                        body_span: Span::new(self.source_id, body_start, body_end),
+                        raw_delimiter: spec.raw_delimiter,
+                        delimiter_key: spec.delimiter_key,
+                        strip_tabs: spec.strip_tabs,
+                        quoted: spec.quoted,
+                        raw_body,
+                    });
+                    self.capture_remaining_unterminated_heredocs(body_end);
+                    return Ok(());
+                }
+            }
         }
 
         Ok(())
+    }
+
+    fn capture_remaining_unterminated_heredocs(&mut self, eof: ByteOffset) {
+        while let Some(spec) = self.pending_heredocs.pop_front() {
+            self.warnings.push(delimiter_not_found_diagnostic(
+                self.source_id,
+                &spec,
+                eof,
+            ));
+            self.collected_heredoc_bodies.push(HereDocBodyCapture {
+                origin_operator_span: spec.operator_span,
+                delimiter_span: spec.delimiter_span,
+                body_span: Span::new(self.source_id, eof, eof),
+                raw_delimiter: spec.raw_delimiter,
+                delimiter_key: spec.delimiter_key,
+                strip_tabs: spec.strip_tabs,
+                quoted: spec.quoted,
+                raw_body: String::new(),
+            });
+        }
     }
 
     fn read_raw_line(&mut self) -> (String, bool) {

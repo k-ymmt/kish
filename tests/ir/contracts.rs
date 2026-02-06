@@ -40,34 +40,30 @@ fn lowering_context_retains_options_contract() {
 }
 
 #[test]
-fn lower_complete_command_returns_phase0_stub_error() {
+fn lower_complete_command_succeeds() {
     let command = parse_complete_command("echo hello\n");
     let mut context = LoweringContext::new(IrOptions::default());
 
-    let error = context
+    let module = context
         .lower_complete_command(&command)
-        .expect_err("Phase 0 lowering should be stubbed");
+        .expect("lowering should succeed");
 
-    assert_eq!(error.kind, IrErrorKind::UnsupportedForm);
-    assert_eq!(error.span, Some(command.span));
-    assert!(error.message.contains("Phase 0"));
+    assert!(module.code_objects.is_empty());
 }
 
 #[test]
-fn lower_program_returns_phase0_stub_error() {
+fn lower_program_succeeds() {
     let mut parser = parser_for("echo a\necho b\n");
     let program = parser
         .parse_program()
         .expect("program fixture should parse");
 
     let mut context = LoweringContext::new(IrOptions::default());
-    let error = context
+    let module = context
         .lower_program(&program)
-        .expect_err("Phase 0 lowering should be stubbed");
+        .expect("lowering should succeed");
 
-    assert_eq!(error.kind, IrErrorKind::UnsupportedForm);
-    assert_eq!(error.span, program.span);
-    assert!(error.message.contains("Phase 0"));
+    assert!(module.code_objects.is_empty());
 }
 
 #[test]

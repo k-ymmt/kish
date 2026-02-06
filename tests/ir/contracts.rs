@@ -32,6 +32,7 @@ fn lowering_context_retains_options_contract() {
         max_code_objects: 12,
         max_word_program_ops: 13,
         max_redirect_ops: 14,
+        max_arith_program_ops: 16,
         max_arity: 15,
     };
 

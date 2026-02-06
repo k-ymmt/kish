@@ -186,14 +186,118 @@ pub enum RedirectProgramOp {
 /// Arithmetic-expansion subprogram operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArithProgramOp {
+    // -- Operands --
     /// Pushes integer literal.
     PushLiteral(i64),
     /// Loads variable value by symbol id.
     LoadVariable(SymbolId),
-    /// Applies addition.
+
+    // -- Unary --
+    /// Unary plus (identity).
+    UnaryPlus,
+    /// Unary minus (negation).
+    UnaryMinus,
+    /// Bitwise NOT (`~`).
+    BitwiseNot,
+    /// Logical NOT (`!`).
+    LogicalNot,
+
+    // -- Binary arithmetic --
+    /// Addition (`+`).
     Add,
-    /// Applies subtraction.
+    /// Subtraction (`-`).
     Subtract,
+    /// Multiplication (`*`).
+    Multiply,
+    /// Division (`/`).
+    Divide,
+    /// Modulo (`%`).
+    Modulo,
+
+    // -- Bitwise binary --
+    /// Bitwise AND (`&`).
+    BitwiseAnd,
+    /// Bitwise OR (`|`).
+    BitwiseOr,
+    /// Bitwise XOR (`^`).
+    BitwiseXor,
+    /// Left shift (`<<`).
+    ShiftLeft,
+    /// Right shift (`>>`).
+    ShiftRight,
+
+    // -- Comparison --
+    /// Less than (`<`).
+    LessThan,
+    /// Greater than (`>`).
+    GreaterThan,
+    /// Less than or equal (`<=`).
+    LessEqual,
+    /// Greater than or equal (`>=`).
+    GreaterEqual,
+    /// Equal (`==`).
+    Equal,
+    /// Not equal (`!=`).
+    NotEqual,
+
+    // -- Logical binary (short-circuit at runtime) --
+    /// Logical AND (`&&`).
+    LogicalAnd,
+    /// Logical OR (`||`).
+    LogicalOr,
+
+    // -- Assignment --
+    /// Simple assignment (`=`).
+    Assign(SymbolId),
+    /// Compound assignment (e.g. `+=`, `-=`).
+    CompoundAssign(SymbolId, ArithCompoundOp),
+
+    // -- Increment/decrement --
+    /// Pre-increment (`++x`).
+    PreIncrement(SymbolId),
+    /// Pre-decrement (`--x`).
+    PreDecrement(SymbolId),
+    /// Post-increment (`x++`).
+    PostIncrement(SymbolId),
+    /// Post-decrement (`x--`).
+    PostDecrement(SymbolId),
+
+    // -- Control flow (for ternary and short-circuit) --
+    /// Jump if top-of-stack is zero.
+    JmpIfZero(u32),
+    /// Jump if top-of-stack is non-zero.
+    JmpIfNonZero(u32),
+    /// Unconditional jump.
+    Jmp(u32),
+
+    // -- Stack --
+    /// Pops one value from the stack.
+    Pop,
+}
+
+/// Compound-assignment operator kind for arithmetic expressions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArithCompoundOp {
+    /// `+=`
+    Add,
+    /// `-=`
+    Subtract,
+    /// `*=`
+    Multiply,
+    /// `/=`
+    Divide,
+    /// `%=`
+    Modulo,
+    /// `<<=`
+    ShiftLeft,
+    /// `>>=`
+    ShiftRight,
+    /// `&=`
+    BitwiseAnd,
+    /// `|=`
+    BitwiseOr,
+    /// `^=`
+    BitwiseXor,
 }
 
 /// Encoded code object blob.

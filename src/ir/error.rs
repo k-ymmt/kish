@@ -23,6 +23,8 @@ pub enum IrErrorKind {
     InvalidAssignmentShape,
     /// Word form is malformed or inconsistent.
     InvalidWordShape,
+    /// Arithmetic expression is malformed or unsupported.
+    InvalidArithmeticExpression,
 }
 
 /// IR error payload.
@@ -123,6 +125,20 @@ impl IrError {
     ) -> Self {
         Self::new(
             IrErrorKind::InvalidWordShape,
+            span,
+            message,
+            Some(detail.into()),
+        )
+    }
+
+    /// Creates an `InvalidArithmeticExpression` error.
+    pub fn invalid_arithmetic_expression(
+        span: Option<Span>,
+        message: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            IrErrorKind::InvalidArithmeticExpression,
             span,
             message,
             Some(detail.into()),

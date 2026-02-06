@@ -1,3 +1,4 @@
+mod arith_program_lowering;
 mod branch_patch_determinism;
 mod code_object_builder_negative;
 mod code_object_builder_positive;

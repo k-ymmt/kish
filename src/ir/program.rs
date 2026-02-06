@@ -24,6 +24,8 @@ pub struct IrOptions {
     pub max_word_program_ops: usize,
     /// Maximum operations in one redirect subprogram.
     pub max_redirect_ops: usize,
+    /// Maximum operations in one arithmetic subprogram.
+    pub max_arith_program_ops: usize,
     /// Maximum command arity accepted during lowering.
     pub max_arity: usize,
 }
@@ -36,6 +38,7 @@ impl Default for IrOptions {
             max_code_objects: 10_000,
             max_word_program_ops: 10_000,
             max_redirect_ops: 2_000,
+            max_arith_program_ops: 10_000,
             max_arity: 8_192,
         }
     }
@@ -611,6 +614,18 @@ impl IrModuleBuilder {
         &mut self,
         mut program: ArithProgram,
     ) -> Result<ArithProgramId, IrError> {
+        if program.ops.len() > self.options.max_arith_program_ops {
+            return Err(IrError::limit_exceeded(
+                None,
+                "arith program op limit exceeded",
+                format!(
+                    "max_arith_program_ops={}, attempted_ops={}",
+                    self.options.max_arith_program_ops,
+                    program.ops.len()
+                ),
+            ));
+        }
+
         let id = ArithProgramId::new(Self::next_u32_id(
             self.module.arith_programs.len(),
             "arith_programs",

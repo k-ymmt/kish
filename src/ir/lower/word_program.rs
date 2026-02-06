@@ -7,8 +7,9 @@
 use crate::ir::bytecode::WordProgramOp;
 use crate::ir::error::IrError;
 use crate::ir::ids::WordProgramId;
+use crate::ir::lower::arith_program;
 use crate::ir::lower::emit::EmitContext;
-use crate::ir::program::{ArithProgram, WordProgram};
+use crate::ir::program::WordProgram;
 use crate::lexer::{QuoteMarker, QuoteProvenance, SubstitutionKind, SubstitutionMarker};
 
 use crate::ir::hir::{HirAssignment, HirWord};
@@ -227,7 +228,8 @@ fn lower_word_segments(
                 ops.push(WordProgramOp::ExpandCommandSubstitution(co_id));
             }
             WordEventKind::ArithmeticExpansion => {
-                let ap_id = create_stub_arith_program(ctx)?;
+                let raw = &text[event.start..event.end];
+                let ap_id = arith_program::lower_arith_expression(ctx, raw)?;
                 ops.push(WordProgramOp::ExpandArithmetic(ap_id));
             }
         }
@@ -300,7 +302,8 @@ fn emit_inner_segments(
                 ops.push(WordProgramOp::ExpandCommandSubstitution(co_id));
             }
             WordEventKind::ArithmeticExpansion => {
-                let ap_id = create_stub_arith_program(ctx)?;
+                let raw = &text[event.start..event.end];
+                let ap_id = arith_program::lower_arith_expression(ctx, raw)?;
                 ops.push(WordProgramOp::ExpandArithmetic(ap_id));
             }
             WordEventKind::QuotedRegion(QuoteProvenance::BackslashEscaped) => {
@@ -726,10 +729,3 @@ fn create_stub_code_object(
     ctx.module().add_code_object(placeholder)
 }
 
-/// Creates a stub arithmetic program as a placeholder (Phase 9).
-fn create_stub_arith_program(
-    ctx: &mut EmitContext<'_>,
-) -> Result<crate::ir::ids::ArithProgramId, IrError> {
-    ctx.module()
-        .add_arith_program(ArithProgram::default())
-}

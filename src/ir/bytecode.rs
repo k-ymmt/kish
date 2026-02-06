@@ -22,6 +22,21 @@ impl BranchTarget {
     }
 }
 
+/// Hint for runtime command dispatch per POSIX search order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum CommandDispatchHint {
+    /// No command name present; only assignments and/or redirects.
+    /// Assignments affect the current shell environment directly.
+    NoCommand,
+    /// First word is a known POSIX special builtin name (literal, unquoted).
+    /// Runtime should bypass function lookup for these.
+    SpecialBuiltin,
+    /// Standard dispatch: runtime applies full POSIX command search order
+    /// (special builtins -> functions -> regular builtins -> PATH).
+    #[default]
+    Standard,
+}
+
 /// Typed VM instruction stream used before packing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Instruction {
@@ -64,7 +79,7 @@ pub enum Instruction {
     /// Ends simple command assembly.
     EndSimple,
     /// Executes assembled simple command.
-    ExecSimple,
+    ExecSimple(CommandDispatchHint),
     /// Negates top-of-stack exit status (0 -> 1, nonzero -> 0).
     NegateStatus,
     /// Forks a subshell, executes code object, pushes exit status.

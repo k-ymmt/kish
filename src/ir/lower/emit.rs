@@ -3,16 +3,16 @@
 //! Translates structured HIR control-flow into flat `Instruction` streams
 //! using `CodeObjectBuilder` and `IrModuleBuilder`.
 
-use crate::ir::bytecode::Instruction;
+use crate::ir::bytecode::{CommandDispatchHint, Instruction};
 use crate::ir::error::IrError;
 use crate::ir::hir::{
     HirAndOr, HirAndOrConnector, HirCaseClause, HirCaseTerminator, HirCommand,
     HirCompleteCommand, HirCompoundCommand, HirCompoundCommandNode, HirForClause,
     HirFunctionDefinition, HirIfClause, HirList, HirListTerminator, HirPipeline, HirProgram,
-    HirUntilClause, HirWhileClause,
+    HirSimpleCommand, HirUntilClause, HirWhileClause, HirWord,
 };
-use crate::ir::ids::{CodeObjectId, WordProgramId};
-use crate::ir::program::{CodeObjectBuilder, IrModuleBuilder, WordProgram};
+use crate::ir::ids::{CodeObjectId, RedirectProgramId, WordProgramId};
+use crate::ir::program::{CodeObjectBuilder, IrModuleBuilder, RedirectProgram, WordProgram};
 
 // ---------------------------------------------------------------------------
 // EmitContext
@@ -207,9 +207,8 @@ fn emit_command(
     command: &HirCommand,
 ) -> Result<(), IrError> {
     match command {
-        HirCommand::Simple(_simple) => {
-            // Phase 6 stub: push 0 as exit status.
-            builder.emit(Instruction::PushInt(0))?;
+        HirCommand::Simple(simple) => {
+            emit_simple_command(builder, ctx, simple)?;
         }
         HirCommand::Compound(node) => {
             emit_compound_command_node(builder, ctx, node)?;
@@ -579,10 +578,304 @@ fn compile_compound_as_code_object(
 }
 
 // ---------------------------------------------------------------------------
+// Simple command emission
+// ---------------------------------------------------------------------------
+
+/// Emits a simple command: assignments, arguments, redirects, then exec.
+fn emit_simple_command(
+    builder: &mut CodeObjectBuilder,
+    ctx: &mut EmitContext<'_>,
+    simple: &HirSimpleCommand,
+) -> Result<(), IrError> {
+    builder.emit(Instruction::BeginSimple)?;
+
+    // Emit assignments.
+    for assign in &simple.assignments {
+        let sym = ctx.module().intern_symbol(&assign.name)?;
+        let wp = stub_word_program(ctx)?;
+        builder.emit(Instruction::AddAssign(sym, wp))?;
+    }
+
+    // Emit word arguments.
+    for _word in &simple.words {
+        let wp = stub_word_program(ctx)?;
+        builder.emit(Instruction::AddArg(wp))?;
+    }
+
+    // Emit redirects.
+    for _redir in &simple.redirects {
+        let rp = stub_redirect_program(ctx)?;
+        builder.emit(Instruction::AddRedir(rp))?;
+    }
+
+    builder.emit(Instruction::EndSimple)?;
+
+    let hint = classify_dispatch_hint(simple);
+    builder.emit(Instruction::ExecSimple(hint))?;
+
+    Ok(())
+}
+
+/// Determines the dispatch hint for a simple command.
+fn classify_dispatch_hint(simple: &HirSimpleCommand) -> CommandDispatchHint {
+    if simple.words.is_empty() {
+        return CommandDispatchHint::NoCommand;
+    }
+
+    let first_word = &simple.words[0];
+    if is_plain_literal_word(first_word) && is_posix_special_builtin(&first_word.token.lexeme) {
+        return CommandDispatchHint::SpecialBuiltin;
+    }
+
+    CommandDispatchHint::Standard
+}
+
+/// Returns `true` if the word has no quote markers and no substitution markers.
+fn is_plain_literal_word(word: &HirWord) -> bool {
+    word.token.quote_markers.is_empty() && word.token.substitution_markers.is_empty()
+}
+
+/// Returns `true` if the name is a POSIX special builtin.
+fn is_posix_special_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "break"
+            | ":"
+            | "continue"
+            | "."
+            | "eval"
+            | "exec"
+            | "exit"
+            | "export"
+            | "readonly"
+            | "return"
+            | "set"
+            | "shift"
+            | "times"
+            | "trap"
+            | "unset"
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Helper: stub word program
 // ---------------------------------------------------------------------------
 
 /// Creates a stub (empty) word program as a Phase 7 placeholder.
 fn stub_word_program(ctx: &mut EmitContext<'_>) -> Result<WordProgramId, IrError> {
     ctx.module().add_word_program(WordProgram::default())
+}
+
+// ---------------------------------------------------------------------------
+// Helper: stub redirect program
+// ---------------------------------------------------------------------------
+
+/// Creates a stub (empty) redirect program as a Phase 8 placeholder.
+fn stub_redirect_program(ctx: &mut EmitContext<'_>) -> Result<RedirectProgramId, IrError> {
+    ctx.module().add_redirect_program(RedirectProgram::default())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::program::IrOptions;
+    use crate::lexer::{Lexer, LexerMode, SourceId};
+    use crate::parser::{ParseOptions, ParseStep, Parser, TokenStream};
+
+    fn lower_command(input: &str) -> crate::ir::program::IrModule {
+        let lexer = Lexer::new(input, LexerMode::Normal);
+        let stream = TokenStream::new(lexer);
+        let mut parser = Parser::new(SourceId::new(0), ParseOptions::default(), stream);
+        let step = parser
+            .parse_complete_command()
+            .expect("parse should succeed");
+        let ParseStep::Complete(command) = step else {
+            panic!("expected complete command, got {step:?}");
+        };
+        let mut lctx = crate::ir::lower::LoweringContext::new(IrOptions::default());
+        lctx.lower_complete_command(&command)
+            .expect("lowering should succeed")
+    }
+
+    fn top_instructions(module: &crate::ir::program::IrModule) -> &[Instruction] {
+        &module.code_objects[0].instructions
+    }
+
+    // -----------------------------------------------------------------------
+    // Assignment-only
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn assignment_only_emits_no_command_hint() {
+        let module = lower_command("A=1\n");
+        let instrs = top_instructions(&module);
+        assert_eq!(instrs[0], Instruction::BeginSimple);
+        assert!(matches!(instrs[1], Instruction::AddAssign(_, _)));
+        assert_eq!(instrs[2], Instruction::EndSimple);
+        assert_eq!(
+            instrs[3],
+            Instruction::ExecSimple(CommandDispatchHint::NoCommand)
+        );
+        assert_eq!(instrs[4], Instruction::Ret);
+    }
+
+    #[test]
+    fn multiple_assignments_only() {
+        let module = lower_command("A=1 B=2\n");
+        let instrs = top_instructions(&module);
+        let assign_count = instrs
+            .iter()
+            .filter(|i| matches!(i, Instruction::AddAssign(_, _)))
+            .count();
+        assert_eq!(assign_count, 2);
+        assert!(instrs.contains(&Instruction::ExecSimple(CommandDispatchHint::NoCommand)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Arg-only
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn arg_only_emits_standard_hint() {
+        let module = lower_command("ls -la\n");
+        let instrs = top_instructions(&module);
+        assert_eq!(instrs[0], Instruction::BeginSimple);
+        assert!(matches!(instrs[1], Instruction::AddArg(_)));
+        assert!(matches!(instrs[2], Instruction::AddArg(_)));
+        assert_eq!(instrs[3], Instruction::EndSimple);
+        assert_eq!(
+            instrs[4],
+            Instruction::ExecSimple(CommandDispatchHint::Standard)
+        );
+        assert_eq!(instrs[5], Instruction::Ret);
+    }
+
+    // -----------------------------------------------------------------------
+    // Redirect-only
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn redirect_only_emits_no_command_hint() {
+        let module = lower_command(">out.txt\n");
+        let instrs = top_instructions(&module);
+        assert_eq!(instrs[0], Instruction::BeginSimple);
+        assert!(matches!(instrs[1], Instruction::AddRedir(_)));
+        assert_eq!(instrs[2], Instruction::EndSimple);
+        assert_eq!(
+            instrs[3],
+            Instruction::ExecSimple(CommandDispatchHint::NoCommand)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Mixed: assignment + args + redirect
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn mixed_command_emits_standard_hint() {
+        let module = lower_command("A=1 cmd arg >out\n");
+        let instrs = top_instructions(&module);
+        assert_eq!(instrs[0], Instruction::BeginSimple);
+        // Assignment first
+        assert!(matches!(instrs[1], Instruction::AddAssign(_, _)));
+        // Then args
+        assert!(matches!(instrs[2], Instruction::AddArg(_)));
+        assert!(matches!(instrs[3], Instruction::AddArg(_)));
+        // Then redirect
+        assert!(matches!(instrs[4], Instruction::AddRedir(_)));
+        assert_eq!(instrs[5], Instruction::EndSimple);
+        assert_eq!(
+            instrs[6],
+            Instruction::ExecSimple(CommandDispatchHint::Standard)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Assignment + redirect (no command name)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn assignment_plus_redirect_emits_no_command_hint() {
+        let module = lower_command("A=1 >file\n");
+        let instrs = top_instructions(&module);
+        assert!(matches!(instrs[1], Instruction::AddAssign(_, _)));
+        assert!(matches!(instrs[2], Instruction::AddRedir(_)));
+        assert!(instrs.contains(&Instruction::ExecSimple(CommandDispatchHint::NoCommand)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Special builtin detection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn export_emits_special_builtin_hint() {
+        let module = lower_command("export FOO=bar\n");
+        let instrs = top_instructions(&module);
+        assert!(instrs.contains(&Instruction::ExecSimple(
+            CommandDispatchHint::SpecialBuiltin
+        )));
+    }
+
+    #[test]
+    fn all_posix_special_builtins_detected() {
+        let builtins = [
+            "break", ":", "continue", ".", "eval", "exec", "exit", "export", "readonly",
+            "return", "set", "shift", "times", "trap", "unset",
+        ];
+        for name in builtins {
+            let input = format!("{name} arg\n");
+            let module = lower_command(&input);
+            let instrs = top_instructions(&module);
+            assert!(
+                instrs.contains(&Instruction::ExecSimple(
+                    CommandDispatchHint::SpecialBuiltin
+                )),
+                "expected SpecialBuiltin for `{name}`"
+            );
+        }
+    }
+
+    #[test]
+    fn non_special_builtin_emits_standard_hint() {
+        let module = lower_command("echo hello\n");
+        let instrs = top_instructions(&module);
+        assert!(instrs.contains(&Instruction::ExecSimple(CommandDispatchHint::Standard)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Assignment name interning
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn assignment_name_is_interned_as_symbol() {
+        let module = lower_command("MYVAR=hello\n");
+        assert!(module.symbol_pool.iter().any(|s| s == "MYVAR"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Word programs and redirect programs are created
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn word_programs_created_for_args() {
+        let module = lower_command("ls -la\n");
+        assert_eq!(module.word_programs.len(), 2);
+    }
+
+    #[test]
+    fn redirect_programs_created_for_redirects() {
+        let module = lower_command("cmd >out.txt\n");
+        assert_eq!(module.redirect_programs.len(), 1);
+    }
+
+    #[test]
+    fn assignment_value_creates_word_program() {
+        let module = lower_command("A=1 B=2\n");
+        // Two assignments -> two stub word programs for values.
+        assert_eq!(module.word_programs.len(), 2);
+    }
 }

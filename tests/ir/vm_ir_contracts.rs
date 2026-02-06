@@ -1,6 +1,6 @@
 use kish::ir::{
-    BranchTarget, CodeObjectId, ConstId, Instruction, LocalId, RedirectProgramId, StringId,
-    SymbolId, WordProgramId,
+    BranchTarget, CodeObjectId, CommandDispatchHint, ConstId, Instruction, LocalId,
+    RedirectProgramId, StringId, SymbolId, WordProgramId,
 };
 
 #[test]
@@ -31,6 +31,6 @@ fn instruction_variants_cover_phase2_contract() {
         Instruction::AddAssign(SymbolId::new(4), WordProgramId::new(5)),
         Instruction::AddRedir(RedirectProgramId::new(6)),
         Instruction::EndSimple,
-        Instruction::ExecSimple,
+        Instruction::ExecSimple(CommandDispatchHint::Standard),
     ];
 }

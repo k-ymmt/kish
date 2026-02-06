@@ -1,6 +1,8 @@
 //! Phase 5 tests: HIR -> VM IR control flow emission.
 
-use kish::ir::{BranchTarget, Instruction, IrModule, IrOptions, LoweringContext};
+use kish::ir::{
+    BranchTarget, CommandDispatchHint, Instruction, IrModule, IrOptions, LoweringContext,
+};
 use kish::lexer::{Lexer, LexerMode, SourceId};
 use kish::parser::{ParseOptions, ParseStep, Parser, TokenStream};
 
@@ -41,15 +43,19 @@ fn top_instructions(module: &IrModule) -> &[Instruction] {
 }
 
 // ---------------------------------------------------------------------------
-// Simple command stub
+// Simple command emission
 // ---------------------------------------------------------------------------
 
 #[test]
-fn simple_command_emits_push_int_zero() {
+fn simple_command_emits_begin_end_exec() {
     let module = lower_command("echo hello\n");
     let instrs = top_instructions(&module);
-    // Should contain PushInt(0) as stub + Ret
-    assert!(instrs.contains(&Instruction::PushInt(0)));
+    // Should contain BeginSimple, AddArg x2, EndSimple, ExecSimple(Standard), Ret
+    assert!(instrs.contains(&Instruction::BeginSimple));
+    assert!(instrs.contains(&Instruction::EndSimple));
+    assert!(instrs
+        .iter()
+        .any(|i| matches!(i, Instruction::ExecSimple(CommandDispatchHint::Standard))));
     assert_eq!(instrs.last(), Some(&Instruction::Ret));
 }
 
@@ -60,11 +66,18 @@ fn simple_command_single_produces_one_code_object() {
 }
 
 #[test]
-fn simple_command_stub_return_value() {
+fn simple_command_single_word() {
     let module = lower_command("true\n");
     let instrs = top_instructions(&module);
-    // The stub emits PushInt(0), Ret
-    assert_eq!(instrs, &[Instruction::PushInt(0), Instruction::Ret]);
+    // BeginSimple, AddArg(wp), EndSimple, ExecSimple(Standard), Ret
+    assert_eq!(instrs[0], Instruction::BeginSimple);
+    assert!(matches!(instrs[1], Instruction::AddArg(_)));
+    assert_eq!(instrs[2], Instruction::EndSimple);
+    assert_eq!(
+        instrs[3],
+        Instruction::ExecSimple(CommandDispatchHint::Standard)
+    );
+    assert_eq!(instrs[4], Instruction::Ret);
 }
 
 // ---------------------------------------------------------------------------
@@ -75,41 +88,45 @@ fn simple_command_stub_return_value() {
 fn list_two_commands_has_drop_between() {
     let module = lower_command("a; b\n");
     let instrs = top_instructions(&module);
-    // Expected: PushInt(0), Drop, PushInt(0), Ret
-    assert_eq!(
-        instrs,
-        &[
-            Instruction::PushInt(0),
-            Instruction::Drop,
-            Instruction::PushInt(0),
-            Instruction::Ret,
-        ]
-    );
+    // Each simple command: BeginSimple, AddArg, EndSimple, ExecSimple(Standard)
+    // Between commands: Drop
+    assert!(instrs.contains(&Instruction::Drop));
+    // Verify structure: two ExecSimple with a Drop between them.
+    let exec_positions: Vec<_> = instrs
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| matches!(i, Instruction::ExecSimple(_)))
+        .map(|(idx, _)| idx)
+        .collect();
+    assert_eq!(exec_positions.len(), 2);
+    // Drop should be right after first ExecSimple.
+    assert_eq!(instrs[exec_positions[0] + 1], Instruction::Drop);
 }
 
 #[test]
 fn list_three_commands_has_two_drops() {
     let module = lower_command("a; b; c\n");
     let instrs = top_instructions(&module);
-    // Expected: PushInt(0), Drop, PushInt(0), Drop, PushInt(0), Ret
-    assert_eq!(
-        instrs,
-        &[
-            Instruction::PushInt(0),
-            Instruction::Drop,
-            Instruction::PushInt(0),
-            Instruction::Drop,
-            Instruction::PushInt(0),
-            Instruction::Ret,
-        ]
-    );
+    let drop_count = instrs
+        .iter()
+        .filter(|i| matches!(i, Instruction::Drop))
+        .count();
+    assert_eq!(drop_count, 2);
+    let exec_count = instrs
+        .iter()
+        .filter(|i| matches!(i, Instruction::ExecSimple(_)))
+        .count();
+    assert_eq!(exec_count, 3);
 }
 
 #[test]
 fn list_single_command_no_drop() {
     let module = lower_command("a\n");
     let instrs = top_instructions(&module);
-    assert_eq!(instrs, &[Instruction::PushInt(0), Instruction::Ret]);
+    // No Drop for single command.
+    assert!(!instrs.iter().any(|i| matches!(i, Instruction::Drop)));
+    assert_eq!(instrs[0], Instruction::BeginSimple);
+    assert_eq!(instrs.last(), Some(&Instruction::Ret));
 }
 
 // ---------------------------------------------------------------------------
@@ -120,62 +137,82 @@ fn list_single_command_no_drop() {
 fn and_if_chain_emits_dup_jmp_if_nonzero() {
     let module = lower_command("a && b\n");
     let instrs = top_instructions(&module);
-    // PushInt(0), Dup, JmpIfNonZero(skip), Drop, PushInt(0), skip: Ret
-    assert_eq!(instrs[0], Instruction::PushInt(0));
-    assert_eq!(instrs[1], Instruction::Dup);
-    assert!(matches!(instrs[2], Instruction::JmpIfNonZero(_)));
-    assert_eq!(instrs[3], Instruction::Drop);
-    assert_eq!(instrs[4], Instruction::PushInt(0));
-    assert_eq!(instrs[5], Instruction::Ret);
+    // a: BeginSimple, AddArg, EndSimple, ExecSimple(Standard)
+    // Dup, JmpIfNonZero(skip)
+    // Drop
+    // b: BeginSimple, AddArg, EndSimple, ExecSimple(Standard)
+    // skip: Ret
+    assert_eq!(instrs[0], Instruction::BeginSimple);
+    let exec_a_idx = instrs
+        .iter()
+        .position(|i| matches!(i, Instruction::ExecSimple(_)))
+        .unwrap();
+    assert_eq!(instrs[exec_a_idx + 1], Instruction::Dup);
+    assert!(matches!(
+        instrs[exec_a_idx + 2],
+        Instruction::JmpIfNonZero(_)
+    ));
+    assert_eq!(instrs[exec_a_idx + 3], Instruction::Drop);
 
-    // The jump target should point to Ret (index 5)
-    let Instruction::JmpIfNonZero(target) = instrs[2] else {
+    // The jump target should point to Ret (last instruction)
+    let Instruction::JmpIfNonZero(target) = instrs[exec_a_idx + 2] else {
         panic!("expected JmpIfNonZero");
     };
-    assert_eq!(target, BranchTarget::new(5));
+    assert_eq!(
+        target,
+        BranchTarget::new((instrs.len() - 1) as u32)
+    );
 }
 
 #[test]
 fn or_if_chain_emits_dup_jmp_if_zero() {
     let module = lower_command("a || b\n");
     let instrs = top_instructions(&module);
-    assert_eq!(instrs[0], Instruction::PushInt(0));
-    assert_eq!(instrs[1], Instruction::Dup);
-    assert!(matches!(instrs[2], Instruction::JmpIfZero(_)));
-    assert_eq!(instrs[3], Instruction::Drop);
-    assert_eq!(instrs[4], Instruction::PushInt(0));
-    assert_eq!(instrs[5], Instruction::Ret);
+    let exec_a_idx = instrs
+        .iter()
+        .position(|i| matches!(i, Instruction::ExecSimple(_)))
+        .unwrap();
+    assert_eq!(instrs[exec_a_idx + 1], Instruction::Dup);
+    assert!(matches!(instrs[exec_a_idx + 2], Instruction::JmpIfZero(_)));
+    assert_eq!(instrs[exec_a_idx + 3], Instruction::Drop);
 
-    let Instruction::JmpIfZero(target) = instrs[2] else {
+    let Instruction::JmpIfZero(target) = instrs[exec_a_idx + 2] else {
         panic!("expected JmpIfZero");
     };
-    assert_eq!(target, BranchTarget::new(5));
+    assert_eq!(
+        target,
+        BranchTarget::new((instrs.len() - 1) as u32)
+    );
 }
 
 #[test]
 fn and_or_mixed_chain() {
     let module = lower_command("a && b || c\n");
     let instrs = top_instructions(&module);
-    // a: PushInt(0)
-    // Dup, JmpIfNonZero(skip_b)
-    // Drop, b: PushInt(0)
-    // skip_b:
-    // Dup, JmpIfZero(skip_c)
-    // Drop, c: PushInt(0)
-    // skip_c:
-    // Ret
-    assert_eq!(instrs[0], Instruction::PushInt(0)); // a
-    assert_eq!(instrs[1], Instruction::Dup);
-    assert!(matches!(instrs[2], Instruction::JmpIfNonZero(_))); // skip_b
-    assert_eq!(instrs[3], Instruction::Drop);
-    assert_eq!(instrs[4], Instruction::PushInt(0)); // b
-    // skip_b target = index 5
-    assert_eq!(instrs[5], Instruction::Dup);
-    assert!(matches!(instrs[6], Instruction::JmpIfZero(_))); // skip_c
-    assert_eq!(instrs[7], Instruction::Drop);
-    assert_eq!(instrs[8], Instruction::PushInt(0)); // c
-    // skip_c target = index 9
-    assert_eq!(instrs[9], Instruction::Ret);
+    // Find ExecSimple positions for a, b, c.
+    let exec_positions: Vec<_> = instrs
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| matches!(i, Instruction::ExecSimple(_)))
+        .map(|(idx, _)| idx)
+        .collect();
+    assert_eq!(exec_positions.len(), 3);
+
+    // After a: Dup, JmpIfNonZero(skip_b)
+    assert_eq!(instrs[exec_positions[0] + 1], Instruction::Dup);
+    assert!(matches!(
+        instrs[exec_positions[0] + 2],
+        Instruction::JmpIfNonZero(_)
+    ));
+
+    // After b: Dup, JmpIfZero(skip_c)
+    assert_eq!(instrs[exec_positions[1] + 1], Instruction::Dup);
+    assert!(matches!(
+        instrs[exec_positions[1] + 2],
+        Instruction::JmpIfZero(_)
+    ));
+
+    assert_eq!(instrs.last(), Some(&Instruction::Ret));
 }
 
 #[test]
@@ -239,31 +276,35 @@ fn negated_multi_pipeline_emits_negate_after_exec() {
 fn if_then_fi_basic_structure() {
     let module = lower_command("if true; then echo y; fi\n");
     let instrs = top_instructions(&module);
-    // condition: PushInt(0)
-    // JmpIfNonZero(else_label)
-    // then_body: PushInt(0)
-    // Jmp(end)
-    // else_label: PushInt(0)  -- no else -> default 0
-    // end:
-    // Ret
-    assert!(instrs.contains(&Instruction::PushInt(0)));
-    assert!(instrs.iter().any(|i| matches!(i, Instruction::JmpIfNonZero(_))));
+    // Should have JmpIfNonZero for condition and Jmp for then->end.
+    assert!(instrs
+        .iter()
+        .any(|i| matches!(i, Instruction::JmpIfNonZero(_))));
     assert!(instrs.iter().any(|i| matches!(i, Instruction::Jmp(_))));
+    // No else -> default PushInt(0) for "no branch taken".
+    assert!(instrs.contains(&Instruction::PushInt(0)));
 }
 
 #[test]
 fn if_else_has_no_default_push() {
     let module = lower_command("if true; then echo y; else echo n; fi\n");
     let instrs = top_instructions(&module);
-    // With else body, there should be exactly 2 PushInt(0): condition stub + then body stub
-    // plus else body stub = 3 PushInt(0)
-    // No extra default PushInt(0) for "no branch taken".
+    // With an else body, there should be no extra default PushInt(0).
+    // Only PushInt(0) should be absent (all branches are real commands now).
+    // Verify the structure: condition uses ExecSimple, then body uses ExecSimple,
+    // else body uses ExecSimple; no standalone PushInt(0).
+    let exec_count = instrs
+        .iter()
+        .filter(|i| matches!(i, Instruction::ExecSimple(_)))
+        .count();
+    // condition + then_body + else_body = 3 simple commands.
+    assert_eq!(exec_count, 3);
+    // No default PushInt(0) since else body covers the fallback.
     let push_count = instrs
         .iter()
         .filter(|i| matches!(i, Instruction::PushInt(0)))
         .count();
-    // condition (PushInt(0)), then_body (PushInt(0)), else_body (PushInt(0))
-    assert_eq!(push_count, 3);
+    assert_eq!(push_count, 0);
 }
 
 #[test]
@@ -289,13 +330,13 @@ fn if_elif_else_structure() {
 fn if_no_else_pushes_default_zero() {
     let module = lower_command("if true; then echo y; fi\n");
     let instrs = top_instructions(&module);
-    // The code should contain PushInt(0) for: condition stub, then body stub, default exit
+    // Default PushInt(0) for no-else branch. Condition and then-body use ExecSimple.
+    // Only one PushInt(0) for the default exit status.
     let push_count = instrs
         .iter()
         .filter(|i| matches!(i, Instruction::PushInt(0)))
         .count();
-    // condition + then_body + default = 3
-    assert_eq!(push_count, 3);
+    assert_eq!(push_count, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -452,9 +493,13 @@ fn brace_group_emits_inline() {
     let module = lower_command("{ echo a; }\n");
     // Brace group should NOT create a sub code object.
     assert_eq!(module.code_objects.len(), 1);
-    // Should just have the stub PushInt(0) inline.
+    // Should emit simple command inline.
     let instrs = top_instructions(&module);
-    assert_eq!(instrs, &[Instruction::PushInt(0), Instruction::Ret]);
+    assert_eq!(instrs[0], Instruction::BeginSimple);
+    assert!(instrs
+        .iter()
+        .any(|i| matches!(i, Instruction::ExecSimple(_))));
+    assert_eq!(instrs.last(), Some(&Instruction::Ret));
 }
 
 #[test]
@@ -535,14 +580,15 @@ fn compound_in_pipeline() {
 fn program_multiple_commands_drops_between() {
     let module = lower_program("echo a\necho b\n");
     let instrs = top_instructions(&module);
-    // program: PushInt(0), Drop, PushInt(0), Ret
-    assert_eq!(
-        instrs,
-        &[
-            Instruction::PushInt(0),
-            Instruction::Drop,
-            Instruction::PushInt(0),
-            Instruction::Ret,
-        ]
-    );
+    // Two simple commands with Drop between them.
+    let exec_positions: Vec<_> = instrs
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| matches!(i, Instruction::ExecSimple(_)))
+        .map(|(idx, _)| idx)
+        .collect();
+    assert_eq!(exec_positions.len(), 2);
+    // Drop should be right after first ExecSimple.
+    assert_eq!(instrs[exec_positions[0] + 1], Instruction::Drop);
+    assert_eq!(instrs.last(), Some(&Instruction::Ret));
 }

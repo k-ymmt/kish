@@ -13,8 +13,8 @@ pub mod program;
 pub mod verify;
 
 pub use bytecode::{
-    ArithProgramOp, BranchTarget, EncodedCodeObject, EncodedModule, Instruction, RedirectProgramOp,
-    WordProgramOp,
+    ArithProgramOp, BranchTarget, CommandDispatchHint, EncodedCodeObject, EncodedModule,
+    Instruction, RedirectProgramOp, WordProgramOp,
 };
 pub use encode::encode_module;
 pub use error::{IrError, IrErrorKind};

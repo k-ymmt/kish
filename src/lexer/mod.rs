@@ -81,6 +81,27 @@ pub enum RecoveryPolicy {
     NonInteractive,
 }
 
+/// Limits used for allocation/memory guardrails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LexerLimits {
+    /// Maximum bytes allowed for a single token lexeme.
+    pub max_token_bytes: usize,
+    /// Maximum bytes allowed for a single captured here-doc body.
+    pub max_here_doc_body_bytes: usize,
+    /// Maximum tokens emitted for one complete-command boundary call.
+    pub max_boundary_tokens: usize,
+}
+
+impl Default for LexerLimits {
+    fn default() -> Self {
+        Self {
+            max_token_bytes: 1_048_576,
+            max_here_doc_body_bytes: 8_388_608,
+            max_boundary_tokens: 65_536,
+        }
+    }
+}
+
 /// Configuration options for lexer behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LexerOptions {
@@ -88,6 +109,8 @@ pub struct LexerOptions {
     pub here_doc_eof_policy: HereDocEofPolicy,
     /// Recovery policy for incomplete lexer states.
     pub recovery_policy: RecoveryPolicy,
+    /// Limit guardrails for token/body/boundary accumulation.
+    pub limits: LexerLimits,
 }
 
 impl Default for LexerOptions {
@@ -95,6 +118,7 @@ impl Default for LexerOptions {
         Self {
             here_doc_eof_policy: HereDocEofPolicy::StrictError,
             recovery_policy: RecoveryPolicy::Interactive,
+            limits: LexerLimits::default(),
         }
     }
 }
@@ -117,6 +141,8 @@ pub struct Lexer<'a> {
     replay_tokens: VecDeque<Token>,
     collected_heredoc_bodies: Vec<HereDocBodyCapture>,
     warnings: Vec<LexDiagnostic>,
+    probe_lexeme_scratch: Vec<u8>,
+    probe_marker_scratch: Vec<SubstitutionMarker>,
 }
 
 impl<'a> Lexer<'a> {
@@ -137,6 +163,8 @@ impl<'a> Lexer<'a> {
             replay_tokens: VecDeque::new(),
             collected_heredoc_bodies: Vec::new(),
             warnings: Vec::new(),
+            probe_lexeme_scratch: Vec::new(),
+            probe_marker_scratch: Vec::new(),
         }
     }
 
@@ -237,8 +265,13 @@ impl<'a> Lexer<'a> {
 
     fn scan_word_token(&mut self) -> Result<LexStep, FatalLexError> {
         let start = self.cursor.offset();
+        if let Some(token) = self.try_scan_plain_word_fast_path(start)? {
+            return Ok(LexStep::Token(token));
+        }
+
         let mut quote_scanner = QuoteScanner::default();
-        let mut lexeme_bytes = Vec::new();
+        let remaining = self.input.len().saturating_sub(start.as_usize());
+        let mut lexeme_bytes = Vec::with_capacity(remaining.min(256));
         let mut quote_markers = Vec::new();
         let mut substitution_markers = Vec::new();
 
@@ -273,6 +306,11 @@ impl<'a> Lexer<'a> {
                             .advance_byte(self.input)
                             .expect("peeked byte must be consumable");
                         lexeme_bytes.push(consumed);
+                        self.ensure_token_size_limit(
+                            start,
+                            self.cursor.offset(),
+                            lexeme_bytes.len(),
+                        )?;
                         if consumed == b'\'' {
                             let closed = quote_scanner
                                 .close(OpenQuoteKind::Single)
@@ -291,10 +329,20 @@ impl<'a> Lexer<'a> {
                             &mut substitution_markers,
                             1,
                         )? {
+                            self.ensure_token_size_limit(
+                                start,
+                                self.cursor.offset(),
+                                lexeme_bytes.len(),
+                            )?;
                             continue;
                         }
                         if byte == b'\\' {
                             self.consume_backslash_escape(&mut lexeme_bytes, &mut quote_markers);
+                            self.ensure_token_size_limit(
+                                start,
+                                self.cursor.offset(),
+                                lexeme_bytes.len(),
+                            )?;
                             continue;
                         }
                         let consumed = self
@@ -302,6 +350,11 @@ impl<'a> Lexer<'a> {
                             .advance_byte(self.input)
                             .expect("peeked byte must be consumable");
                         lexeme_bytes.push(consumed);
+                        self.ensure_token_size_limit(
+                            start,
+                            self.cursor.offset(),
+                            lexeme_bytes.len(),
+                        )?;
                         if consumed == b'"' {
                             let closed = quote_scanner
                                 .close(OpenQuoteKind::Double)
@@ -317,6 +370,11 @@ impl<'a> Lexer<'a> {
                     OpenQuoteKind::DollarSingle => {
                         if byte == b'\\' {
                             self.consume_backslash_escape(&mut lexeme_bytes, &mut quote_markers);
+                            self.ensure_token_size_limit(
+                                start,
+                                self.cursor.offset(),
+                                lexeme_bytes.len(),
+                            )?;
                             continue;
                         }
                         let consumed = self
@@ -324,6 +382,11 @@ impl<'a> Lexer<'a> {
                             .advance_byte(self.input)
                             .expect("peeked byte must be consumable");
                         lexeme_bytes.push(consumed);
+                        self.ensure_token_size_limit(
+                            start,
+                            self.cursor.offset(),
+                            lexeme_bytes.len(),
+                        )?;
                         if consumed == b'\'' {
                             let closed = quote_scanner
                                 .close(OpenQuoteKind::DollarSingle)
@@ -341,17 +404,22 @@ impl<'a> Lexer<'a> {
             }
 
             if self.try_consume_substitution(&mut lexeme_bytes, &mut substitution_markers, 1)? {
+                self.ensure_token_size_limit(start, self.cursor.offset(), lexeme_bytes.len())?;
                 continue;
             }
 
             match byte {
-                b'\\' => self.consume_backslash_escape(&mut lexeme_bytes, &mut quote_markers),
+                b'\\' => {
+                    self.consume_backslash_escape(&mut lexeme_bytes, &mut quote_markers);
+                    self.ensure_token_size_limit(start, self.cursor.offset(), lexeme_bytes.len())?;
+                }
                 b'\'' => {
                     let consumed = self
                         .cursor
                         .advance_byte(self.input)
                         .expect("peeked byte must be consumable");
                     lexeme_bytes.push(consumed);
+                    self.ensure_token_size_limit(start, self.cursor.offset(), lexeme_bytes.len())?;
                     quote_scanner.open(OpenQuoteKind::Single, token_start, source_start);
                 }
                 b'"' => {
@@ -360,6 +428,7 @@ impl<'a> Lexer<'a> {
                         .advance_byte(self.input)
                         .expect("peeked byte must be consumable");
                     lexeme_bytes.push(consumed);
+                    self.ensure_token_size_limit(start, self.cursor.offset(), lexeme_bytes.len())?;
                     quote_scanner.open(OpenQuoteKind::Double, token_start, source_start);
                 }
                 b'$' if self.cursor.peek_next_byte(self.input) == Some(b'\'') => {
@@ -373,6 +442,7 @@ impl<'a> Lexer<'a> {
                         .advance_byte(self.input)
                         .expect("second byte for dollar-single quote must exist");
                     lexeme_bytes.push(quote);
+                    self.ensure_token_size_limit(start, self.cursor.offset(), lexeme_bytes.len())?;
                     quote_scanner.open(OpenQuoteKind::DollarSingle, token_start, source_start);
                 }
                 _ => {
@@ -381,6 +451,7 @@ impl<'a> Lexer<'a> {
                         .advance_byte(self.input)
                         .expect("peeked byte must be consumable");
                     lexeme_bytes.push(consumed);
+                    self.ensure_token_size_limit(start, self.cursor.offset(), lexeme_bytes.len())?;
                 }
             }
         }
@@ -402,6 +473,56 @@ impl<'a> Lexer<'a> {
             Span::new(self.source_id, start, end),
             quote_markers,
             substitution_markers,
+        )))
+    }
+
+    fn try_scan_plain_word_fast_path(
+        &mut self,
+        start: ByteOffset,
+    ) -> Result<Option<Token>, FatalLexError> {
+        let mut probe = self.cursor;
+
+        while !probe.is_eof(self.input) {
+            let Some(byte) = probe.peek_byte(self.input) else {
+                break;
+            };
+
+            if byte.is_ascii_whitespace() || has_operator_prefix(&probe, self.input) {
+                break;
+            }
+
+            if byte == b'\\' && probe.peek_next_byte(self.input) == Some(b'\n') {
+                return Ok(None);
+            }
+
+            let needs_slow_path = matches!(byte, b'\\' | b'\'' | b'"' | b'`')
+                || (byte == b'$'
+                    && matches!(
+                        probe.peek_next_byte(self.input),
+                        Some(b'{') | Some(b'(') | Some(b'\'')
+                    ));
+            if needs_slow_path {
+                return Ok(None);
+            }
+
+            let _ = probe
+                .advance_byte(self.input)
+                .expect("peeked byte must be consumable");
+            let current_len = probe.offset().as_usize().saturating_sub(start.as_usize());
+            self.ensure_token_size_limit(start, probe.offset(), current_len)?;
+        }
+
+        if probe.offset() == start {
+            return Ok(None);
+        }
+
+        self.cursor = probe;
+        let end = self.cursor.offset();
+        let lexeme = self.input[start.as_usize()..end.as_usize()].to_string();
+        Ok(Some(Token::new(
+            TokenKind::Token,
+            lexeme,
+            Span::new(self.source_id, start, end),
         )))
     }
 
@@ -480,8 +601,8 @@ impl<'a> Lexer<'a> {
             let mut raw_body = String::new();
 
             let (body_end, found_delimiter) = loop {
-                let line_start = self.cursor.offset();
-                let (line, had_newline) = self.read_raw_line();
+                let (line_span, had_newline) = self.read_raw_line_span();
+                let line = self.span_slice(line_span);
 
                 if line.is_empty() && !had_newline {
                     break (self.cursor.offset(), false);
@@ -495,14 +616,24 @@ impl<'a> Lexer<'a> {
                 };
 
                 if candidate == spec.delimiter_key {
-                    break (line_start, true);
+                    break (line_span.start, true);
                 }
 
-                if spec.strip_tabs {
-                    raw_body.push_str(strip_tabs_for_storage(&line));
+                let addition = if spec.strip_tabs {
+                    strip_tabs_for_storage(&line)
                 } else {
-                    raw_body.push_str(&line);
+                    line
+                };
+                if raw_body.len().saturating_add(addition.len())
+                    > self.options.limits.max_here_doc_body_bytes
+                {
+                    return Err(self.heredoc_body_size_limit_error(
+                        body_start,
+                        line_span.end,
+                        self.options.limits.max_here_doc_body_bytes,
+                    ));
                 }
+                raw_body.push_str(addition);
 
                 if !had_newline {
                     break (self.cursor.offset(), false);
@@ -579,24 +710,29 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn read_raw_line(&mut self) -> (String, bool) {
-        let mut bytes = Vec::new();
+    fn read_raw_line_span(&mut self) -> (Span, bool) {
+        let start = self.cursor.offset();
         let mut had_newline = false;
 
         while let Some(byte) = self.cursor.peek_byte(self.input) {
-            let consumed = self
+            let _ = self
                 .cursor
                 .advance_byte(self.input)
                 .expect("peeked byte must be consumable");
-            bytes.push(consumed);
             if byte == b'\n' {
                 had_newline = true;
                 break;
             }
         }
 
-        let line = String::from_utf8(bytes).expect("input is valid UTF-8");
-        (line, had_newline)
+        (
+            Span::new(self.source_id, start, self.cursor.offset()),
+            had_newline,
+        )
+    }
+
+    fn span_slice(&self, span: Span) -> &str {
+        &self.input[span.start.as_usize()..span.end.as_usize()]
     }
 
     fn try_skip_comment_until_newline(&mut self) -> bool {
@@ -654,6 +790,12 @@ impl<'a> Lexer<'a> {
 
             match step {
                 LexStep::Token(token) => {
+                    if tokens.len() >= self.options.limits.max_boundary_tokens {
+                        return Err(self.boundary_token_limit_error(
+                            token.span,
+                            self.options.limits.max_boundary_tokens,
+                        ));
+                    }
                     let is_newline = token.kind == TokenKind::Newline;
                     tokens.push(token);
                     if is_newline {
@@ -702,13 +844,13 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn detect_incomplete_input_reason(&self) -> Result<Option<NeedMoreReason>, FatalLexError> {
+    fn detect_incomplete_input_reason(&mut self) -> Result<Option<NeedMoreReason>, FatalLexError> {
         let mut probe = self.cursor;
         let mut quote_context = QuoteContext::default();
         let mut previous_byte: Option<u8> = None;
         let mut saw_unquoted_trailing_backslash = false;
-        let mut probe_lexeme_bytes = Vec::new();
-        let mut probe_markers = Vec::new();
+        self.probe_lexeme_scratch.clear();
+        self.probe_marker_scratch.clear();
 
         while !probe.is_eof(self.input) {
             if consume_line_continuation_if_unquoted(&mut probe, self.input, &mut quote_context) {
@@ -721,9 +863,10 @@ impl<'a> Lexer<'a> {
                 let scan = match try_scan_dollar(
                     &mut probe,
                     self.input,
-                    &mut probe_lexeme_bytes,
-                    &mut probe_markers,
+                    &mut self.probe_lexeme_scratch,
+                    &mut self.probe_marker_scratch,
                     1,
+                    self.options.limits.max_token_bytes,
                 ) {
                     Ok(scan) => scan,
                     Err(error) => {
@@ -734,11 +877,12 @@ impl<'a> Lexer<'a> {
                             self.source_id,
                             self.input,
                             error,
+                            self.options.limits.max_token_bytes,
                         ));
                     }
                 };
                 if let Some(scan) = scan {
-                    probe_markers.push(marker_from_scan(scan));
+                    self.probe_marker_scratch.push(marker_from_scan(scan));
                     saw_unquoted_trailing_backslash = false;
                     previous_byte = None;
                     continue;
@@ -747,9 +891,10 @@ impl<'a> Lexer<'a> {
                 let scan = match try_scan_backquote(
                     &mut probe,
                     self.input,
-                    &mut probe_lexeme_bytes,
-                    &mut probe_markers,
+                    &mut self.probe_lexeme_scratch,
+                    &mut self.probe_marker_scratch,
                     1,
+                    self.options.limits.max_token_bytes,
                 ) {
                     Ok(scan) => scan,
                     Err(error) => {
@@ -760,11 +905,12 @@ impl<'a> Lexer<'a> {
                             self.source_id,
                             self.input,
                             error,
+                            self.options.limits.max_token_bytes,
                         ));
                     }
                 };
                 if let Some(scan) = scan {
-                    probe_markers.push(marker_from_scan(scan));
+                    self.probe_marker_scratch.push(marker_from_scan(scan));
                     saw_unquoted_trailing_backslash = false;
                     previous_byte = None;
                     continue;
@@ -810,8 +956,16 @@ impl<'a> Lexer<'a> {
                 lexeme_bytes,
                 substitution_markers,
                 depth,
+                self.options.limits.max_token_bytes,
             )
-            .map_err(|error| fatal_error_from_scan_error(self.source_id, self.input, error))?
+            .map_err(|error| {
+                fatal_error_from_scan_error(
+                    self.source_id,
+                    self.input,
+                    error,
+                    self.options.limits.max_token_bytes,
+                )
+            })?
         } else if byte == b'`' {
             try_scan_backquote(
                 &mut self.cursor,
@@ -819,8 +973,16 @@ impl<'a> Lexer<'a> {
                 lexeme_bytes,
                 substitution_markers,
                 depth,
+                self.options.limits.max_token_bytes,
             )
-            .map_err(|error| fatal_error_from_scan_error(self.source_id, self.input, error))?
+            .map_err(|error| {
+                fatal_error_from_scan_error(
+                    self.source_id,
+                    self.input,
+                    error,
+                    self.options.limits.max_token_bytes,
+                )
+            })?
         } else {
             None
         };
@@ -858,6 +1020,58 @@ impl<'a> Lexer<'a> {
             marker_start,
             lexeme_bytes.len(),
         );
+    }
+
+    fn ensure_token_size_limit(
+        &self,
+        start: ByteOffset,
+        end: ByteOffset,
+        current_len: usize,
+    ) -> Result<(), FatalLexError> {
+        if current_len <= self.options.limits.max_token_bytes {
+            return Ok(());
+        }
+        Err(self.token_size_limit_error(start, end, self.options.limits.max_token_bytes))
+    }
+
+    fn token_size_limit_error(
+        &self,
+        start: ByteOffset,
+        end: ByteOffset,
+        limit: usize,
+    ) -> FatalLexError {
+        FatalLexError::TokenSizeLimitExceeded(LexDiagnostic::with_context(
+            DiagnosticCode::TokenSizeLimitExceeded,
+            format!("token size exceeded configured limit ({limit} bytes)"),
+            Span::new(self.source_id, start, end),
+            diagnostics::near_text_snippet(self.input, start, end),
+            Some("reduce token size or raise lexer token-size limit.".to_string()),
+        ))
+    }
+
+    fn heredoc_body_size_limit_error(
+        &self,
+        body_start: ByteOffset,
+        end: ByteOffset,
+        limit: usize,
+    ) -> FatalLexError {
+        FatalLexError::HereDocBodySizeLimitExceeded(LexDiagnostic::with_context(
+            DiagnosticCode::HereDocBodySizeLimitExceeded,
+            format!("here-document body exceeded configured limit ({limit} bytes)"),
+            Span::new(self.source_id, body_start, end),
+            diagnostics::near_text_snippet(self.input, body_start, end),
+            Some("reduce here-document body size or raise lexer here-doc body limit.".to_string()),
+        ))
+    }
+
+    fn boundary_token_limit_error(&self, offending_span: Span, limit: usize) -> FatalLexError {
+        FatalLexError::BoundaryTokenLimitExceeded(LexDiagnostic::with_context(
+            DiagnosticCode::BoundaryTokenLimitExceeded,
+            format!("boundary token count exceeded configured limit ({limit})"),
+            offending_span,
+            diagnostics::near_text_snippet(self.input, offending_span.start, offending_span.end),
+            Some("split the command across boundaries or raise boundary token limit.".to_string()),
+        ))
     }
 
     fn fatal_error_for_need_more_reason(&self, reason: NeedMoreReason) -> FatalLexError {
@@ -941,6 +1155,9 @@ impl<'a> Lexer<'a> {
             | FatalLexError::MalformedArithmeticExpansion(diagnostic)
             | FatalLexError::SubstitutionRecursionDepthExceeded(diagnostic)
             | FatalLexError::HereDocDelimiterNotFound(diagnostic)
+            | FatalLexError::TokenSizeLimitExceeded(diagnostic)
+            | FatalLexError::HereDocBodySizeLimitExceeded(diagnostic)
+            | FatalLexError::BoundaryTokenLimitExceeded(diagnostic)
             | FatalLexError::IncompleteInput(diagnostic) => {
                 diagnostic.span = Span::new(
                     diagnostic.span.source_id,

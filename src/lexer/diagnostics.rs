@@ -30,6 +30,12 @@ pub enum DiagnosticCode {
     SubstitutionRecursionDepthExceeded,
     /// Here-document delimiter was not found before input end.
     HereDocDelimiterNotFound,
+    /// Token bytes exceeded configured lexer token limit.
+    TokenSizeLimitExceeded,
+    /// Here-document body bytes exceeded configured lexer limit.
+    HereDocBodySizeLimitExceeded,
+    /// Token count exceeded configured boundary token limit.
+    BoundaryTokenLimitExceeded,
     /// Placeholder for internal invariant violations.
     InternalInvariant,
 }
@@ -105,6 +111,12 @@ pub enum FatalLexError {
     SubstitutionRecursionDepthExceeded(LexDiagnostic),
     /// Here-document delimiter was not found before input end.
     HereDocDelimiterNotFound(LexDiagnostic),
+    /// Token bytes exceeded configured lexer token limit.
+    TokenSizeLimitExceeded(LexDiagnostic),
+    /// Here-document body bytes exceeded configured lexer limit.
+    HereDocBodySizeLimitExceeded(LexDiagnostic),
+    /// Token count exceeded configured boundary token limit.
+    BoundaryTokenLimitExceeded(LexDiagnostic),
     /// Input is incomplete in a mode that requires hard failure.
     IncompleteInput(LexDiagnostic),
 }

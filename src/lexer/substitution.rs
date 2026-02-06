@@ -29,6 +29,7 @@ pub(crate) enum SubstitutionScanErrorKind {
     UnterminatedBackquotedCommandSubstitution,
     UnterminatedArithmeticExpansion,
     MalformedArithmeticExpansion,
+    TokenSizeLimitExceeded,
     RecursionDepthExceeded,
 }
 
@@ -48,22 +49,40 @@ pub(crate) fn try_scan_dollar(
     token_bytes: &mut Vec<u8>,
     nested_markers: &mut Vec<SubstitutionMarker>,
     depth: u16,
+    max_token_bytes: usize,
 ) -> Result<Option<SubstitutionScan>, SubstitutionScanError> {
     if cursor.peek_byte(input) != Some(b'$') {
         return Ok(None);
     }
 
     match (peek_at(cursor, input, 1), peek_at(cursor, input, 2)) {
-        (Some(b'{'), _) => {
-            scan_parameter_braced(cursor, input, token_bytes, nested_markers, depth).map(Some)
-        }
-        (Some(b'('), Some(b'(')) => {
-            scan_arithmetic_substitution(cursor, input, token_bytes, nested_markers, depth)
-                .map(Some)
-        }
-        (Some(b'('), _) => {
-            scan_command_substitution(cursor, input, token_bytes, nested_markers, depth).map(Some)
-        }
+        (Some(b'{'), _) => scan_parameter_braced(
+            cursor,
+            input,
+            token_bytes,
+            nested_markers,
+            depth,
+            max_token_bytes,
+        )
+        .map(Some),
+        (Some(b'('), Some(b'(')) => scan_arithmetic_substitution(
+            cursor,
+            input,
+            token_bytes,
+            nested_markers,
+            depth,
+            max_token_bytes,
+        )
+        .map(Some),
+        (Some(b'('), _) => scan_command_substitution(
+            cursor,
+            input,
+            token_bytes,
+            nested_markers,
+            depth,
+            max_token_bytes,
+        )
+        .map(Some),
         _ => Ok(None),
     }
 }
@@ -75,12 +94,21 @@ pub(crate) fn try_scan_backquote(
     token_bytes: &mut Vec<u8>,
     nested_markers: &mut Vec<SubstitutionMarker>,
     depth: u16,
+    max_token_bytes: usize,
 ) -> Result<Option<SubstitutionScan>, SubstitutionScanError> {
     if cursor.peek_byte(input) != Some(b'`') {
         return Ok(None);
     }
 
-    scan_backquoted_substitution(cursor, input, token_bytes, nested_markers, depth).map(Some)
+    scan_backquoted_substitution(
+        cursor,
+        input,
+        token_bytes,
+        nested_markers,
+        depth,
+        max_token_bytes,
+    )
+    .map(Some)
 }
 
 /// Converts scan result to a token marker.
@@ -112,6 +140,7 @@ pub(crate) fn need_more_reason_from_scan_error(
             Some(NeedMoreReason::UnterminatedArithmeticExpansion)
         }
         SubstitutionScanErrorKind::MalformedArithmeticExpansion => None,
+        SubstitutionScanErrorKind::TokenSizeLimitExceeded => None,
         SubstitutionScanErrorKind::RecursionDepthExceeded => None,
     }
 }
@@ -121,6 +150,7 @@ pub(crate) fn fatal_error_from_scan_error(
     source_id: SourceId,
     input: &str,
     error: SubstitutionScanError,
+    max_token_bytes: usize,
 ) -> FatalLexError {
     let span = Span::new(source_id, error.source_start, error.source_end);
     let near_text = near_text_snippet(input, error.source_start, error.source_end);
@@ -171,6 +201,17 @@ pub(crate) fn fatal_error_from_scan_error(
                 Some(suggestion_fix_arithmetic_expansion()),
             ))
         }
+        SubstitutionScanErrorKind::TokenSizeLimitExceeded => {
+            FatalLexError::TokenSizeLimitExceeded(LexDiagnostic::with_context(
+                DiagnosticCode::TokenSizeLimitExceeded,
+                format!(
+                    "token size exceeded configured limit ({max_token_bytes} bytes) while scanning substitution"
+                ),
+                span,
+                near_text.clone(),
+                Some("reduce token size or raise lexer token-size limit.".to_string()),
+            ))
+        }
         SubstitutionScanErrorKind::RecursionDepthExceeded => {
             FatalLexError::SubstitutionRecursionDepthExceeded(LexDiagnostic::with_context(
                 DiagnosticCode::SubstitutionRecursionDepthExceeded,
@@ -194,28 +235,53 @@ fn scan_parameter_braced(
     token_bytes: &mut Vec<u8>,
     nested_markers: &mut Vec<SubstitutionMarker>,
     depth: u16,
+    max_token_bytes: usize,
 ) -> Result<SubstitutionScan, SubstitutionScanError> {
     let token_start = token_bytes.len();
     let source_start = cursor.offset();
     ensure_depth(depth, source_start)?;
 
-    consume_byte(cursor, input, token_bytes); // $
-    consume_byte(cursor, input, token_bytes); // {
+    consume_byte(
+        cursor,
+        input,
+        token_bytes,
+        depth,
+        source_start,
+        max_token_bytes,
+    )?; // $
+    consume_byte(
+        cursor,
+        input,
+        token_bytes,
+        depth,
+        source_start,
+        max_token_bytes,
+    )?; // {
 
     let mut braces = 1usize;
     let mut state = SubstitutionQuoteState::default();
 
     while !cursor.is_eof(input) {
         if state.can_start_substitution() {
-            if let Some(scan) =
-                try_scan_dollar(cursor, input, token_bytes, nested_markers, depth + 1)?
-            {
+            if let Some(scan) = try_scan_dollar(
+                cursor,
+                input,
+                token_bytes,
+                nested_markers,
+                depth + 1,
+                max_token_bytes,
+            )? {
                 nested_markers.push(marker_from_scan(scan));
                 continue;
             }
-            if let Some(scan) =
-                try_scan_backquote(cursor, input, token_bytes, nested_markers, depth + 1)?
-            {
+            if let Some(scan) = try_scan_backquote(
+                cursor,
+                input,
+                token_bytes,
+                nested_markers,
+                depth + 1,
+                max_token_bytes,
+            )? {
                 nested_markers.push(marker_from_scan(scan));
                 continue;
             }
@@ -228,14 +294,28 @@ fn scan_parameter_braced(
         if state.is_unquoted() {
             if byte == b'{' {
                 let next = cursor.peek_next_byte(input);
-                let consumed = consume_byte(cursor, input, token_bytes);
+                let consumed = consume_byte(
+                    cursor,
+                    input,
+                    token_bytes,
+                    depth,
+                    source_start,
+                    max_token_bytes,
+                )?;
                 state.observe(consumed, next);
                 braces += 1;
                 continue;
             }
             if byte == b'}' {
                 let next = cursor.peek_next_byte(input);
-                let consumed = consume_byte(cursor, input, token_bytes);
+                let consumed = consume_byte(
+                    cursor,
+                    input,
+                    token_bytes,
+                    depth,
+                    source_start,
+                    max_token_bytes,
+                )?;
                 state.observe(consumed, next);
                 braces -= 1;
                 if braces == 0 {
@@ -250,7 +330,14 @@ fn scan_parameter_braced(
         }
 
         let next = cursor.peek_next_byte(input);
-        let consumed = consume_byte(cursor, input, token_bytes);
+        let consumed = consume_byte(
+            cursor,
+            input,
+            token_bytes,
+            depth,
+            source_start,
+            max_token_bytes,
+        )?;
         state.observe(consumed, next);
     }
 
@@ -268,28 +355,53 @@ fn scan_command_substitution(
     token_bytes: &mut Vec<u8>,
     nested_markers: &mut Vec<SubstitutionMarker>,
     depth: u16,
+    max_token_bytes: usize,
 ) -> Result<SubstitutionScan, SubstitutionScanError> {
     let token_start = token_bytes.len();
     let source_start = cursor.offset();
     ensure_depth(depth, source_start)?;
 
-    consume_byte(cursor, input, token_bytes); // $
-    consume_byte(cursor, input, token_bytes); // (
+    consume_byte(
+        cursor,
+        input,
+        token_bytes,
+        depth,
+        source_start,
+        max_token_bytes,
+    )?; // $
+    consume_byte(
+        cursor,
+        input,
+        token_bytes,
+        depth,
+        source_start,
+        max_token_bytes,
+    )?; // (
 
     let mut parens = 1usize;
     let mut state = SubstitutionQuoteState::default();
 
     while !cursor.is_eof(input) {
         if state.can_start_substitution() {
-            if let Some(scan) =
-                try_scan_dollar(cursor, input, token_bytes, nested_markers, depth + 1)?
-            {
+            if let Some(scan) = try_scan_dollar(
+                cursor,
+                input,
+                token_bytes,
+                nested_markers,
+                depth + 1,
+                max_token_bytes,
+            )? {
                 nested_markers.push(marker_from_scan(scan));
                 continue;
             }
-            if let Some(scan) =
-                try_scan_backquote(cursor, input, token_bytes, nested_markers, depth + 1)?
-            {
+            if let Some(scan) = try_scan_backquote(
+                cursor,
+                input,
+                token_bytes,
+                nested_markers,
+                depth + 1,
+                max_token_bytes,
+            )? {
                 nested_markers.push(marker_from_scan(scan));
                 continue;
             }
@@ -302,14 +414,28 @@ fn scan_command_substitution(
         if state.is_unquoted() {
             if byte == b'(' {
                 let next = cursor.peek_next_byte(input);
-                let consumed = consume_byte(cursor, input, token_bytes);
+                let consumed = consume_byte(
+                    cursor,
+                    input,
+                    token_bytes,
+                    depth,
+                    source_start,
+                    max_token_bytes,
+                )?;
                 state.observe(consumed, next);
                 parens += 1;
                 continue;
             }
             if byte == b')' {
                 let next = cursor.peek_next_byte(input);
-                let consumed = consume_byte(cursor, input, token_bytes);
+                let consumed = consume_byte(
+                    cursor,
+                    input,
+                    token_bytes,
+                    depth,
+                    source_start,
+                    max_token_bytes,
+                )?;
                 state.observe(consumed, next);
                 parens -= 1;
                 if parens == 0 {
@@ -324,7 +450,14 @@ fn scan_command_substitution(
         }
 
         let next = cursor.peek_next_byte(input);
-        let consumed = consume_byte(cursor, input, token_bytes);
+        let consumed = consume_byte(
+            cursor,
+            input,
+            token_bytes,
+            depth,
+            source_start,
+            max_token_bytes,
+        )?;
         state.observe(consumed, next);
     }
 
@@ -342,14 +475,36 @@ fn scan_arithmetic_substitution(
     token_bytes: &mut Vec<u8>,
     nested_markers: &mut Vec<SubstitutionMarker>,
     depth: u16,
+    max_token_bytes: usize,
 ) -> Result<SubstitutionScan, SubstitutionScanError> {
     let token_start = token_bytes.len();
     let source_start = cursor.offset();
     ensure_depth(depth, source_start)?;
 
-    consume_byte(cursor, input, token_bytes); // $
-    consume_byte(cursor, input, token_bytes); // (
-    consume_byte(cursor, input, token_bytes); // (
+    consume_byte(
+        cursor,
+        input,
+        token_bytes,
+        depth,
+        source_start,
+        max_token_bytes,
+    )?; // $
+    consume_byte(
+        cursor,
+        input,
+        token_bytes,
+        depth,
+        source_start,
+        max_token_bytes,
+    )?; // (
+    consume_byte(
+        cursor,
+        input,
+        token_bytes,
+        depth,
+        source_start,
+        max_token_bytes,
+    )?; // (
 
     let mut parens = 1usize;
     let mut state = SubstitutionQuoteState::default();
@@ -358,9 +513,14 @@ fn scan_arithmetic_substitution(
     while !cursor.is_eof(input) {
         if state.can_start_substitution() {
             let before = token_bytes.len();
-            if let Some(scan) =
-                try_scan_dollar(cursor, input, token_bytes, nested_markers, depth + 1)?
-            {
+            if let Some(scan) = try_scan_dollar(
+                cursor,
+                input,
+                token_bytes,
+                nested_markers,
+                depth + 1,
+                max_token_bytes,
+            )? {
                 nested_markers.push(marker_from_scan(scan));
                 if token_bytes[before..]
                     .iter()
@@ -371,9 +531,14 @@ fn scan_arithmetic_substitution(
                 continue;
             }
             let before = token_bytes.len();
-            if let Some(scan) =
-                try_scan_backquote(cursor, input, token_bytes, nested_markers, depth + 1)?
-            {
+            if let Some(scan) = try_scan_backquote(
+                cursor,
+                input,
+                token_bytes,
+                nested_markers,
+                depth + 1,
+                max_token_bytes,
+            )? {
                 nested_markers.push(marker_from_scan(scan));
                 if token_bytes[before..]
                     .iter()
@@ -392,7 +557,14 @@ fn scan_arithmetic_substitution(
         if state.is_unquoted() {
             if byte == b'(' {
                 let next = cursor.peek_next_byte(input);
-                let consumed = consume_byte(cursor, input, token_bytes);
+                let consumed = consume_byte(
+                    cursor,
+                    input,
+                    token_bytes,
+                    depth,
+                    source_start,
+                    max_token_bytes,
+                )?;
                 state.observe(consumed, next);
                 parens += 1;
                 saw_non_whitespace = true;
@@ -413,10 +585,24 @@ fn scan_arithmetic_substitution(
                                 });
                             }
                             let next = cursor.peek_next_byte(input);
-                            let consumed = consume_byte(cursor, input, token_bytes);
+                            let consumed = consume_byte(
+                                cursor,
+                                input,
+                                token_bytes,
+                                depth,
+                                source_start,
+                                max_token_bytes,
+                            )?;
                             state.observe(consumed, next);
                             let next = cursor.peek_next_byte(input);
-                            let consumed = consume_byte(cursor, input, token_bytes);
+                            let consumed = consume_byte(
+                                cursor,
+                                input,
+                                token_bytes,
+                                depth,
+                                source_start,
+                                max_token_bytes,
+                            )?;
                             state.observe(consumed, next);
                             return Ok(SubstitutionScan {
                                 kind: SubstitutionKind::ArithmeticExpansion,
@@ -439,7 +625,14 @@ fn scan_arithmetic_substitution(
                 }
                 if parens > 1 {
                     let next = cursor.peek_next_byte(input);
-                    let consumed = consume_byte(cursor, input, token_bytes);
+                    let consumed = consume_byte(
+                        cursor,
+                        input,
+                        token_bytes,
+                        depth,
+                        source_start,
+                        max_token_bytes,
+                    )?;
                     state.observe(consumed, next);
                     parens -= 1;
                     continue;
@@ -448,7 +641,14 @@ fn scan_arithmetic_substitution(
         }
 
         let next = cursor.peek_next_byte(input);
-        let consumed = consume_byte(cursor, input, token_bytes);
+        let consumed = consume_byte(
+            cursor,
+            input,
+            token_bytes,
+            depth,
+            source_start,
+            max_token_bytes,
+        )?;
         state.observe(consumed, next);
         if !consumed.is_ascii_whitespace() {
             saw_non_whitespace = true;
@@ -469,19 +669,32 @@ fn scan_backquoted_substitution(
     token_bytes: &mut Vec<u8>,
     nested_markers: &mut Vec<SubstitutionMarker>,
     depth: u16,
+    max_token_bytes: usize,
 ) -> Result<SubstitutionScan, SubstitutionScanError> {
     let token_start = token_bytes.len();
     let source_start = cursor.offset();
     ensure_depth(depth, source_start)?;
 
-    consume_byte(cursor, input, token_bytes); // `
+    consume_byte(
+        cursor,
+        input,
+        token_bytes,
+        depth,
+        source_start,
+        max_token_bytes,
+    )?; // `
     let mut state = SubstitutionQuoteState::default();
 
     while !cursor.is_eof(input) {
         if state.can_start_substitution() {
-            if let Some(scan) =
-                try_scan_dollar(cursor, input, token_bytes, nested_markers, depth + 1)?
-            {
+            if let Some(scan) = try_scan_dollar(
+                cursor,
+                input,
+                token_bytes,
+                nested_markers,
+                depth + 1,
+                max_token_bytes,
+            )? {
                 nested_markers.push(marker_from_scan(scan));
                 continue;
             }
@@ -492,7 +705,14 @@ fn scan_backquoted_substitution(
             .expect("loop guarantees non-eof byte availability");
         if state.is_unquoted() && byte == b'`' {
             let next = cursor.peek_next_byte(input);
-            let consumed = consume_byte(cursor, input, token_bytes);
+            let consumed = consume_byte(
+                cursor,
+                input,
+                token_bytes,
+                depth,
+                source_start,
+                max_token_bytes,
+            )?;
             state.observe(consumed, next);
             return Ok(SubstitutionScan {
                 kind: SubstitutionKind::BackquotedCommandSubstitution,
@@ -502,7 +722,14 @@ fn scan_backquoted_substitution(
         }
 
         let next = cursor.peek_next_byte(input);
-        let consumed = consume_byte(cursor, input, token_bytes);
+        let consumed = consume_byte(
+            cursor,
+            input,
+            token_bytes,
+            depth,
+            source_start,
+            max_token_bytes,
+        )?;
         state.observe(consumed, next);
     }
 
@@ -527,12 +754,27 @@ fn ensure_depth(depth: u16, source_start: ByteOffset) -> Result<(), Substitution
     })
 }
 
-fn consume_byte(cursor: &mut Cursor, input: &str, token_bytes: &mut Vec<u8>) -> u8 {
+fn consume_byte(
+    cursor: &mut Cursor,
+    input: &str,
+    token_bytes: &mut Vec<u8>,
+    depth: u16,
+    source_start: ByteOffset,
+    max_token_bytes: usize,
+) -> Result<u8, SubstitutionScanError> {
     let byte = cursor
         .advance_byte(input)
         .expect("peeked byte must be consumable");
     token_bytes.push(byte);
-    byte
+    if token_bytes.len() > max_token_bytes {
+        return Err(SubstitutionScanError {
+            kind: SubstitutionScanErrorKind::TokenSizeLimitExceeded,
+            source_start,
+            source_end: cursor.offset(),
+            depth,
+        });
+    }
+    Ok(byte)
 }
 
 fn peek_at(cursor: &Cursor, input: &str, distance: usize) -> Option<u8> {

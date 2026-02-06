@@ -35,6 +35,9 @@ fn recoverable_and_fatal_errors_are_distinct_types() {
         | FatalLexError::MalformedArithmeticExpansion(_)
         | FatalLexError::SubstitutionRecursionDepthExceeded(_)
         | FatalLexError::HereDocDelimiterNotFound(_)
+        | FatalLexError::TokenSizeLimitExceeded(_)
+        | FatalLexError::HereDocBodySizeLimitExceeded(_)
+        | FatalLexError::BoundaryTokenLimitExceeded(_)
         | FatalLexError::IncompleteInput(_) => {
             panic!("unexpected fatal variant")
         }

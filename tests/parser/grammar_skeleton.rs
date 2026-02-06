@@ -8,7 +8,11 @@ fn parser_for(input: &str, options: ParseOptions) -> Parser<'_> {
 }
 
 fn parse_one(input: &str) -> ParseStep {
-    let mut parser = parser_for(input, ParseOptions::default());
+    parse_one_with_options(input, ParseOptions::default())
+}
+
+fn parse_one_with_options(input: &str, options: ParseOptions) -> ParseStep {
+    let mut parser = parser_for(input, options);
     parser
         .parse_complete_command()
         .expect("complete command should parse")
@@ -119,14 +123,190 @@ fn unimplemented_reserved_word_fails_fast() {
 }
 
 #[test]
-fn redirection_in_command_fails_fast() {
-    let mut parser = parser_for("echo > out\n", ParseOptions::default());
+fn redirection_in_command_parses() {
+    let step = parse_one("echo > out\n");
+    let simple = first_simple(&step);
+
+    let lexemes: Vec<&str> = simple
+        .words
+        .iter()
+        .map(|word| word.token.lexeme.as_str())
+        .collect();
+    assert_eq!(lexemes, vec!["echo"]);
+    assert_eq!(simple.redirects.len(), 1);
+    assert_eq!(simple.redirects[0].operator, OperatorKind::Greater);
+    assert_eq!(simple.redirects[0].target.token.lexeme, "out");
+    assert!(simple.redirects[0].fd_or_location.is_none());
+}
+
+#[test]
+fn redirect_prefix_form_parses() {
+    let step = parse_one(">out echo\n");
+    let simple = first_simple(&step);
+
+    let lexemes: Vec<&str> = simple
+        .words
+        .iter()
+        .map(|word| word.token.lexeme.as_str())
+        .collect();
+    assert_eq!(lexemes, vec!["echo"]);
+    assert_eq!(simple.redirects.len(), 1);
+    assert_eq!(simple.redirects[0].operator, OperatorKind::Greater);
+    assert_eq!(simple.redirects[0].target.token.lexeme, "out");
+}
+
+#[test]
+fn assignment_only_simple_command_parses() {
+    let step = parse_one("VAR=1\n");
+    let simple = first_simple(&step);
+
+    assert_eq!(simple.assignments.len(), 1);
+    assert_eq!(simple.assignments[0].name, "VAR");
+    assert_eq!(simple.assignments[0].value, "1");
+    assert!(simple.words.is_empty());
+    assert!(simple.redirects.is_empty());
+}
+
+#[test]
+fn assignment_prefix_with_command_words_parses() {
+    let step = parse_one("VAR=1 echo a b\n");
+    let simple = first_simple(&step);
+
+    assert_eq!(simple.assignments.len(), 1);
+    assert_eq!(simple.assignments[0].name, "VAR");
+    let lexemes: Vec<&str> = simple
+        .words
+        .iter()
+        .map(|word| word.token.lexeme.as_str())
+        .collect();
+    assert_eq!(lexemes, vec!["echo", "a", "b"]);
+}
+
+#[test]
+fn assignment_like_word_in_suffix_stays_word() {
+    let step = parse_one("echo a=1\n");
+    let simple = first_simple(&step);
+
+    assert!(simple.assignments.is_empty());
+    let lexemes: Vec<&str> = simple
+        .words
+        .iter()
+        .map(|word| word.token.lexeme.as_str())
+        .collect();
+    assert_eq!(lexemes, vec!["echo", "a=1"]);
+}
+
+#[test]
+fn io_number_redirect_parses() {
+    let step = parse_one("2>out echo\n");
+    let simple = first_simple(&step);
+
+    assert_eq!(simple.redirects.len(), 1);
+    assert_eq!(simple.redirects[0].operator, OperatorKind::Greater);
+    assert_eq!(simple.redirects[0].target.token.lexeme, "out");
+    assert_eq!(
+        simple.redirects[0]
+            .fd_or_location
+            .as_ref()
+            .map(|token| token.lexeme.as_str()),
+        Some("2")
+    );
+    let lexemes: Vec<&str> = simple
+        .words
+        .iter()
+        .map(|word| word.token.lexeme.as_str())
+        .collect();
+    assert_eq!(lexemes, vec!["echo"]);
+}
+
+#[test]
+fn io_location_redirect_is_gated_by_option() {
+    let disabled = parse_one("{fd}>out echo\n");
+    let disabled_simple = first_simple(&disabled);
+    assert_eq!(disabled_simple.redirects.len(), 1);
+    assert!(disabled_simple.redirects[0].fd_or_location.is_none());
+    let disabled_words: Vec<&str> = disabled_simple
+        .words
+        .iter()
+        .map(|word| word.token.lexeme.as_str())
+        .collect();
+    assert_eq!(disabled_words, vec!["{fd}", "echo"]);
+
+    let enabled = parse_one_with_options(
+        "{fd}>out echo\n",
+        ParseOptions {
+            allow_io_location: true,
+            ..Default::default()
+        },
+    );
+    let enabled_simple = first_simple(&enabled);
+    assert_eq!(enabled_simple.redirects.len(), 1);
+    assert_eq!(
+        enabled_simple.redirects[0]
+            .fd_or_location
+            .as_ref()
+            .map(|token| token.lexeme.as_str()),
+        Some("{fd}")
+    );
+    let enabled_words: Vec<&str> = enabled_simple
+        .words
+        .iter()
+        .map(|word| word.token.lexeme.as_str())
+        .collect();
+    assert_eq!(enabled_words, vec!["echo"]);
+}
+
+#[test]
+fn redirect_target_word_can_be_numeric() {
+    let step = parse_one("echo > 2 > out\n");
+    let simple = first_simple(&step);
+
+    assert_eq!(simple.redirects.len(), 2);
+    assert_eq!(simple.redirects[0].target.token.lexeme, "2");
+    assert_eq!(simple.redirects[1].target.token.lexeme, "out");
+}
+
+#[test]
+fn redirect_order_is_preserved_across_prefix_and_suffix() {
+    let step = parse_one("a=1 >x cmd y <z\n");
+    let simple = first_simple(&step);
+
+    assert_eq!(simple.assignments.len(), 1);
+    assert_eq!(simple.assignments[0].name, "a");
+    assert_eq!(simple.redirects.len(), 2);
+    assert_eq!(simple.redirects[0].operator, OperatorKind::Greater);
+    assert_eq!(simple.redirects[0].target.token.lexeme, "x");
+    assert_eq!(simple.redirects[1].operator, OperatorKind::Less);
+    assert_eq!(simple.redirects[1].target.token.lexeme, "z");
+    let lexemes: Vec<&str> = simple
+        .words
+        .iter()
+        .map(|word| word.token.lexeme.as_str())
+        .collect();
+    assert_eq!(lexemes, vec!["cmd", "y"]);
+}
+
+#[test]
+fn redirect_missing_target_reports_deterministic_error() {
+    let mut parser = parser_for("echo >\n", ParseOptions::default());
     let error = parser
         .parse_complete_command()
-        .expect_err("redirects are deferred to phase 5");
+        .expect_err("redirect target is required");
+    assert!(matches!(
+        error.kind,
+        ParseErrorKind::UnexpectedEndOfInput | ParseErrorKind::UnexpectedToken
+    ));
+}
+
+#[test]
+fn function_definition_head_is_detected_and_deferred() {
+    let mut parser = parser_for("foo()\n", ParseOptions::default());
+    let error = parser
+        .parse_complete_command()
+        .expect_err("function definitions are deferred to phase 7");
 
     assert_eq!(error.kind, ParseErrorKind::GrammarNotImplemented);
-    assert_eq!(error.found.as_deref(), Some(">"));
+    assert_eq!(error.found.as_deref(), Some("foo"));
 }
 
 #[test]

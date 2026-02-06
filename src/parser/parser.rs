@@ -3,12 +3,12 @@
 use crate::lexer::{DelimiterContext, OperatorKind, SourceId, Span, Token, TokenKind};
 use crate::parser::arena::AstArena;
 use crate::parser::ast::{
-    AndOrAst, AstBuilder, CommandAst, CompleteCommandAst, ListAst, PipelineAst, ProgramAst,
-    SimpleCommandAst, WordAst,
+    AndOrAst, AssignmentWordAst, AstBuilder, CommandAst, CompleteCommandAst, ListAst, PipelineAst,
+    ProgramAst, RedirectAst, SimpleCommandAst, WordAst,
 };
 use crate::parser::classifier::{
     ClassificationContext, ClassificationOptions, ClassifiedTokenKind, Classifier, NameContext,
-    ReservedWord, ReservedWordPolicy,
+    ReservedWord, ReservedWordPolicy, split_assignment_word,
 };
 use crate::parser::error::ParseError;
 use crate::parser::recovery::{NeedMoreInputReason, ParseDiagnostic};
@@ -265,11 +265,15 @@ impl<'a> Parser<'a> {
                 )));
             }
             TokenKind::Operator(kind) => {
-                if is_unimplemented_command_operator(kind) {
+                if kind == OperatorKind::LeftParen {
                     return Err(ParseFailure::Error(ParseError::grammar_not_implemented(
                         Some(head.span),
                         Some(head.lexeme),
                     )));
+                }
+                if is_redirect_operator(kind) {
+                    let simple = self.parse_simple_command_nonterminal()?;
+                    return self.build_command_simple(simple);
                 }
                 return Err(ParseFailure::Error(ParseError::unexpected_token(
                     &head,
@@ -279,7 +283,13 @@ impl<'a> Parser<'a> {
             TokenKind::Token => {}
         }
 
-        let head_kind = self.classify_command_token(0, ReservedWordPolicy::Any)?;
+        let head_kind = self.classify_token_at(
+            0,
+            ClassificationContext {
+                reserved_word_policy: ReservedWordPolicy::Any,
+                ..Default::default()
+            },
+        )?;
         match head_kind {
             ClassifiedTokenKind::ReservedWord(word) if is_unimplemented_reserved(word) => {
                 return Err(ParseFailure::Error(ParseError::grammar_not_implemented(
@@ -287,13 +297,11 @@ impl<'a> Parser<'a> {
                     Some(head.lexeme),
                 )));
             }
-            ClassifiedTokenKind::IoNumber(_) | ClassifiedTokenKind::IoLocation => {
-                return Err(ParseFailure::Error(ParseError::grammar_not_implemented(
-                    Some(head.span),
-                    Some(head.lexeme),
-                )));
-            }
-            ClassifiedTokenKind::Word | ClassifiedTokenKind::Name => {}
+            ClassifiedTokenKind::Word
+            | ClassifiedTokenKind::Name
+            | ClassifiedTokenKind::AssignmentWord
+            | ClassifiedTokenKind::IoNumber(_)
+            | ClassifiedTokenKind::IoLocation => {}
             _ => {
                 return Err(ParseFailure::Error(ParseError::unexpected_token(
                     &head,
@@ -302,10 +310,18 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let first_token = self
-            .next_token()?
-            .ok_or_else(|| ParseFailure::Error(ParseError::unexpected_end_of_input(["WORD"])))?;
-        let mut words = vec![self.build_word(first_token)?];
+        let _ = self.try_parse_function_definition_head()?;
+        let simple = self.parse_simple_command_nonterminal()?;
+        self.build_command_simple(simple)
+    }
+
+    fn parse_simple_command_nonterminal(&mut self) -> ParseResult<SimpleCommandAst> {
+        let mut assignments = Vec::new();
+        let mut words = Vec::new();
+        let mut redirects = Vec::new();
+        let mut saw_command_word = false;
+        let mut span_start = None;
+        let mut span_end = None;
 
         loop {
             let Some(next) = self.peek_token(0)? else {
@@ -319,11 +335,18 @@ impl<'a> Parser<'a> {
                         break;
                     }
 
-                    if is_unimplemented_command_operator(kind) {
+                    if kind == OperatorKind::LeftParen {
                         return Err(ParseFailure::Error(ParseError::grammar_not_implemented(
                             Some(next.span),
                             Some(next.lexeme),
                         )));
+                    }
+
+                    if is_redirect_operator(kind) {
+                        let redirect = self.parse_io_redirect_nonterminal()?;
+                        extend_span_bounds(redirect.span, &mut span_start, &mut span_end);
+                        redirects.push(redirect);
+                        continue;
                     }
 
                     return Err(ParseFailure::Error(ParseError::unexpected_token(
@@ -332,21 +355,41 @@ impl<'a> Parser<'a> {
                     )));
                 }
                 TokenKind::Token => {
-                    let classified = self.classify_command_token(0, ReservedWordPolicy::None)?;
+                    if self.can_start_io_redirect_at(0)? {
+                        let redirect = self.parse_io_redirect_nonterminal()?;
+                        extend_span_bounds(redirect.span, &mut span_start, &mut span_end);
+                        redirects.push(redirect);
+                        continue;
+                    }
+
+                    let classified = self.classify_token_at(
+                        0,
+                        ClassificationContext {
+                            reserved_word_policy: ReservedWordPolicy::None,
+                            allow_assignment_word: !saw_command_word,
+                            ..Default::default()
+                        },
+                    )?;
+
                     match classified {
-                        ClassifiedTokenKind::Word
-                        | ClassifiedTokenKind::Name
-                        | ClassifiedTokenKind::AssignmentWord => {
+                        ClassifiedTokenKind::AssignmentWord if !saw_command_word => {
+                            let token = self.next_token()?.ok_or_else(|| {
+                                ParseFailure::Error(ParseError::unexpected_end_of_input([
+                                    "ASSIGNMENT_WORD",
+                                ]))
+                            })?;
+                            let assignment = self.build_assignment_word(token)?;
+                            extend_span_bounds(assignment.span, &mut span_start, &mut span_end);
+                            assignments.push(assignment);
+                        }
+                        ClassifiedTokenKind::Word | ClassifiedTokenKind::Name => {
                             let token = self.next_token()?.ok_or_else(|| {
                                 ParseFailure::Error(ParseError::unexpected_end_of_input(["WORD"]))
                             })?;
-                            words.push(self.build_word(token)?);
-                        }
-                        ClassifiedTokenKind::IoNumber(_) | ClassifiedTokenKind::IoLocation => {
-                            return Err(ParseFailure::Error(ParseError::grammar_not_implemented(
-                                Some(next.span),
-                                Some(next.lexeme),
-                            )));
+                            let word = self.build_word(token)?;
+                            extend_span_bounds(word.span, &mut span_start, &mut span_end);
+                            words.push(word);
+                            saw_command_word = true;
                         }
                         _ => {
                             return Err(ParseFailure::Error(ParseError::unexpected_token(
@@ -359,12 +402,106 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let first_word_span = words.first().expect("non-empty words").span;
-        let last_word_span = words.last().expect("non-empty words").span;
-        let simple_span = merge_spans(first_word_span, last_word_span);
+        if assignments.is_empty() && words.is_empty() && redirects.is_empty() {
+            return Err(ParseFailure::Error(ParseError::unexpected_end_of_input([
+                "simple command",
+            ])));
+        }
 
-        let simple = self.build_simple_command(words, Some(simple_span))?;
-        self.build_command_simple(simple)
+        let span = match (span_start, span_end) {
+            (Some(start), Some(end)) => Some(merge_spans(start, end)),
+            _ => None,
+        };
+
+        self.build_simple_command(assignments, words, redirects, span)
+    }
+
+    fn parse_io_redirect_nonterminal(&mut self) -> ParseResult<RedirectAst> {
+        let mut fd_or_location = None;
+        let mut start_span = None;
+
+        if let Some(token) = self.peek_token(0)?
+            && token.kind == TokenKind::Token
+        {
+            let classified = self.classify_token_at(
+                0,
+                ClassificationContext {
+                    reserved_word_policy: ReservedWordPolicy::None,
+                    ..Default::default()
+                },
+            )?;
+            if matches!(
+                classified,
+                ClassifiedTokenKind::IoNumber(_) | ClassifiedTokenKind::IoLocation
+            ) {
+                let prefix = self.next_token()?.ok_or_else(|| {
+                    ParseFailure::Error(ParseError::unexpected_end_of_input(["io_redirect"]))
+                })?;
+                start_span = Some(prefix.span);
+                fd_or_location = Some(prefix);
+            }
+        }
+
+        let operator_token = self.next_token()?.ok_or_else(|| {
+            ParseFailure::Error(ParseError::unexpected_end_of_input(["redirect operator"]))
+        })?;
+        let operator = match operator_token.kind {
+            TokenKind::Operator(kind) if is_redirect_operator(kind) => kind,
+            _ => {
+                return Err(ParseFailure::Error(ParseError::unexpected_token(
+                    &operator_token,
+                    ["redirect operator"],
+                )));
+            }
+        };
+
+        let target = self.parse_redirect_target_word()?;
+        let span = merge_spans(start_span.unwrap_or(operator_token.span), target.span);
+        self.build_redirect(fd_or_location, operator, target, span)
+    }
+
+    fn parse_redirect_target_word(&mut self) -> ParseResult<WordAst> {
+        let token = self
+            .next_token()?
+            .ok_or_else(|| ParseFailure::Error(ParseError::unexpected_end_of_input(["WORD"])))?;
+        if token.kind != TokenKind::Token {
+            return Err(ParseFailure::Error(ParseError::unexpected_token(
+                &token,
+                ["WORD"],
+            )));
+        }
+        self.build_word(token)
+    }
+
+    fn try_parse_function_definition_head(&mut self) -> ParseResult<bool> {
+        let Some(name_token) = self.peek_token(0)? else {
+            return Ok(false);
+        };
+        if name_token.kind != TokenKind::Token {
+            return Ok(false);
+        }
+
+        let classified = self.classify_token_at(
+            0,
+            ClassificationContext {
+                reserved_word_policy: ReservedWordPolicy::None,
+                name_context: NameContext::FunctionName,
+                ..Default::default()
+            },
+        )?;
+        if classified != ClassifiedTokenKind::Name {
+            return Ok(false);
+        }
+        if self.peek_operator_kind(1)? != Some(OperatorKind::LeftParen)
+            || self.peek_operator_kind(2)? != Some(OperatorKind::RightParen)
+        {
+            return Ok(false);
+        }
+
+        Err(ParseFailure::Error(ParseError::grammar_not_implemented(
+            Some(name_token.span),
+            Some(name_token.lexeme),
+        )))
     }
 
     fn parse_linebreak(&mut self) -> ParseResult<()> {
@@ -458,31 +595,55 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn classify_command_token(
+    fn classify_token_at(
         &mut self,
         offset: usize,
-        reserved_word_policy: ReservedWordPolicy,
+        mut context: ClassificationContext,
     ) -> ParseResult<ClassifiedTokenKind> {
         let token = self.peek_token(offset)?.ok_or_else(|| {
             ParseFailure::Error(ParseError::unexpected_end_of_input(["command token"]))
         })?;
-        let delimiter_context = self.peek_delimiter_context(offset.saturating_add(1))?;
-
+        if context.delimiter_context.is_none() {
+            context.delimiter_context = self.peek_delimiter_context(offset.saturating_add(1))?;
+        }
         let classified = self.classifier.classify(
             &token,
-            ClassificationContext {
-                delimiter_context,
-                reserved_word_policy,
-                name_context: NameContext::None,
-                allow_assignment_word: false,
-                function_body_rule9: false,
-            },
+            context,
             ClassificationOptions {
                 allow_io_location: self.options.allow_io_location,
             },
         );
 
         Ok(classified.kind)
+    }
+
+    fn can_start_io_redirect_at(&mut self, offset: usize) -> ParseResult<bool> {
+        let Some(token) = self.peek_token(offset)? else {
+            return Ok(false);
+        };
+
+        match token.kind {
+            TokenKind::Operator(kind) => Ok(is_redirect_operator(kind)),
+            TokenKind::Newline => Ok(false),
+            TokenKind::Token => {
+                let classified = self.classify_token_at(
+                    offset,
+                    ClassificationContext {
+                        reserved_word_policy: ReservedWordPolicy::None,
+                        ..Default::default()
+                    },
+                )?;
+                if !matches!(
+                    classified,
+                    ClassifiedTokenKind::IoNumber(_) | ClassifiedTokenKind::IoLocation
+                ) {
+                    return Ok(false);
+                }
+
+                let next_kind = self.peek_operator_kind(offset.saturating_add(1))?;
+                Ok(next_kind.is_some_and(is_redirect_operator))
+            }
+        }
     }
 
     fn peek_delimiter_context(&mut self, offset: usize) -> ParseResult<Option<DelimiterContext>> {
@@ -539,14 +700,41 @@ impl<'a> Parser<'a> {
         builder.word_from_token(token).map_err(ParseFailure::Error)
     }
 
+    fn build_assignment_word(&mut self, token: Token) -> ParseResult<AssignmentWordAst> {
+        let (name, value) = split_assignment_word(&token)
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .ok_or_else(|| {
+                ParseFailure::Error(ParseError::unexpected_token(&token, ["ASSIGNMENT_WORD"]))
+            })?;
+        let mut builder = AstBuilder::new(&mut self.arena);
+        builder
+            .assignment_word_from_parts(token, name, value)
+            .map_err(ParseFailure::Error)
+    }
+
+    fn build_redirect(
+        &mut self,
+        fd_or_location: Option<Token>,
+        operator: OperatorKind,
+        target: WordAst,
+        span: Span,
+    ) -> ParseResult<RedirectAst> {
+        let mut builder = AstBuilder::new(&mut self.arena);
+        builder
+            .redirect(fd_or_location, operator, target, span)
+            .map_err(ParseFailure::Error)
+    }
+
     fn build_simple_command(
         &mut self,
+        assignments: Vec<AssignmentWordAst>,
         words: Vec<WordAst>,
+        redirects: Vec<RedirectAst>,
         span: Option<Span>,
     ) -> ParseResult<SimpleCommandAst> {
         let mut builder = AstBuilder::new(&mut self.arena);
         builder
-            .simple_command(vec![], words, vec![], span)
+            .simple_command(assignments, words, redirects, span)
             .map_err(ParseFailure::Error)
     }
 
@@ -670,7 +858,7 @@ fn is_redirect_operator(kind: OperatorKind) -> bool {
 }
 
 fn is_unimplemented_command_operator(kind: OperatorKind) -> bool {
-    is_redirect_operator(kind) || kind == OperatorKind::LeftParen
+    kind == OperatorKind::LeftParen
 }
 
 fn is_unimplemented_reserved(word: ReservedWord) -> bool {
@@ -704,7 +892,9 @@ fn token_can_start_pipeline(token: &Token) -> bool {
     match token.kind {
         TokenKind::Token => true,
         TokenKind::Newline => false,
-        TokenKind::Operator(kind) => is_unimplemented_command_operator(kind),
+        TokenKind::Operator(kind) => {
+            is_redirect_operator(kind) || is_unimplemented_command_operator(kind)
+        }
     }
 }
 
@@ -722,9 +912,23 @@ fn span_of_command(command: &CommandAst) -> Span {
 }
 
 fn span_of_simple_command(command: &SimpleCommandAst) -> Option<Span> {
-    let first = command.words.first()?.span;
-    let last = command.words.last()?.span;
-    Some(merge_spans(first, last))
+    let mut start = None;
+    let mut end = None;
+
+    for assignment in &command.assignments {
+        extend_span_bounds(assignment.span, &mut start, &mut end);
+    }
+    for word in &command.words {
+        extend_span_bounds(word.span, &mut start, &mut end);
+    }
+    for redirect in &command.redirects {
+        extend_span_bounds(redirect.span, &mut start, &mut end);
+    }
+
+    match (start, end) {
+        (Some(first), Some(last)) => Some(merge_spans(first, last)),
+        _ => None,
+    }
 }
 
 fn span_of_and_or(head: &PipelineAst, tail: &[(OperatorKind, PipelineAst)]) -> Span {
@@ -761,5 +965,25 @@ fn expect_operator_kind(
             token,
             [expected],
         ))),
+    }
+}
+
+fn extend_span_bounds(span: Span, start: &mut Option<Span>, end: &mut Option<Span>) {
+    match start {
+        Some(current) => {
+            if span.start < current.start {
+                *current = span;
+            }
+        }
+        None => *start = Some(span),
+    }
+
+    match end {
+        Some(current) => {
+            if span.end > current.end {
+                *current = span;
+            }
+        }
+        None => *end = Some(span),
     }
 }

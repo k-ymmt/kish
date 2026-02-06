@@ -249,20 +249,26 @@ fn classify_reserved_word(token: &Token, policy: ReservedWordPolicy) -> Option<R
 }
 
 fn classify_assignment_word(token: &Token) -> ClassifiedTokenKind {
-    let Some(eq_index) = first_unquoted_unsubstituted_equals(token) else {
-        return ClassifiedTokenKind::Word;
-    };
-
-    if eq_index == 0 {
-        return ClassifiedTokenKind::Word;
-    }
-
-    let name = &token.lexeme[..eq_index];
-    if is_posix_name(name) {
+    if split_assignment_word(token).is_some() {
         ClassifiedTokenKind::AssignmentWord
     } else {
         ClassifiedTokenKind::Word
     }
+}
+
+/// Splits an assignment token into `name` and `value` when rule-7 compatible.
+pub(crate) fn split_assignment_word(token: &Token) -> Option<(&str, &str)> {
+    let eq_index = first_unquoted_unsubstituted_equals(token)?;
+    if eq_index == 0 {
+        return None;
+    }
+
+    let name = &token.lexeme[..eq_index];
+    if !is_posix_name(name) {
+        return None;
+    }
+
+    Some((name, &token.lexeme[eq_index + 1..]))
 }
 
 fn first_unquoted_unsubstituted_equals(token: &Token) -> Option<usize> {

@@ -328,6 +328,32 @@ impl<'a> AstBuilder<'a> {
         Ok(CommandAst::Compound(command))
     }
 
+    /// Builds a function-definition node.
+    pub fn function_definition(
+        &mut self,
+        name: WordAst,
+        body: CommandAst,
+        redirects: Vec<RedirectAst>,
+        span: Span,
+    ) -> Result<FunctionDefinitionAst, ParseError> {
+        self.reserve_node()?;
+        Ok(FunctionDefinitionAst {
+            name,
+            body: Box::new(body),
+            redirects,
+            span,
+        })
+    }
+
+    /// Wraps a function definition into a command node.
+    pub fn command_function_definition(
+        &mut self,
+        function: FunctionDefinitionAst,
+    ) -> Result<CommandAst, ParseError> {
+        self.reserve_node()?;
+        Ok(CommandAst::FunctionDefinition(function))
+    }
+
     /// Builds a compound-command wrapper.
     pub fn compound_command_node(
         &mut self,

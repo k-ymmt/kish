@@ -5,8 +5,8 @@ use crate::parser::arena::AstArena;
 use crate::parser::ast::{
     AndOrAst, AssignmentWordAst, AstBuilder, CaseClauseAst, CaseItemAst, CaseTerminatorAst,
     CommandAst, CompleteCommandAst, CompoundCommandAst, CompoundCommandNodeAst, ForClauseAst,
-    IfClauseAst, ListAst, PipelineAst, ProgramAst, RedirectAst, SimpleCommandAst, UntilClauseAst,
-    WhileClauseAst, WordAst,
+    FunctionDefinitionAst, IfClauseAst, ListAst, PipelineAst, ProgramAst, RedirectAst,
+    SimpleCommandAst, UntilClauseAst, WhileClauseAst, WordAst,
 };
 use crate::parser::classifier::{
     ClassificationContext, ClassificationOptions, ClassifiedTokenKind, Classifier, NameContext,
@@ -59,6 +59,7 @@ pub struct Parser<'a> {
     classifier: Classifier,
     diagnostics: Vec<ParseDiagnostic>,
     arena: AstArena,
+    function_body_rule9_depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -71,6 +72,7 @@ impl<'a> Parser<'a> {
             classifier: Classifier::new(),
             diagnostics: Vec::new(),
             arena: AstArena::new(options.max_ast_nodes),
+            function_body_rule9_depth: 0,
         }
     }
 
@@ -283,7 +285,9 @@ impl<'a> Parser<'a> {
             TokenKind::Token => {}
         }
 
-        let _ = self.try_parse_function_definition_head()?;
+        if self.is_function_definition_head_at_command_position()? {
+            return self.parse_function_definition_nonterminal();
+        }
         if self.can_start_compound_command()? {
             let compound = self.parse_compound_command_nonterminal()?;
             return self.build_command_compound(compound);
@@ -853,6 +857,7 @@ impl<'a> Parser<'a> {
                         ClassificationContext {
                             reserved_word_policy: ReservedWordPolicy::None,
                             allow_assignment_word: !saw_command_word,
+                            function_body_rule9: self.in_function_body_mode(),
                             ..Default::default()
                         },
                     )?;
@@ -959,7 +964,7 @@ impl<'a> Parser<'a> {
         self.build_word(token)
     }
 
-    fn try_parse_function_definition_head(&mut self) -> ParseResult<bool> {
+    fn is_function_definition_head_at_command_position(&mut self) -> ParseResult<bool> {
         let Some(name_token) = self.peek_token(0)? else {
             return Ok(false);
         };
@@ -970,7 +975,7 @@ impl<'a> Parser<'a> {
         let classified = self.classify_token_at(
             0,
             ClassificationContext {
-                reserved_word_policy: ReservedWordPolicy::None,
+                reserved_word_policy: ReservedWordPolicy::Any,
                 name_context: NameContext::FunctionName,
                 ..Default::default()
             },
@@ -984,10 +989,71 @@ impl<'a> Parser<'a> {
             return Ok(false);
         }
 
-        Err(ParseFailure::Error(ParseError::grammar_not_implemented(
-            Some(name_token.span),
-            Some(name_token.lexeme),
-        )))
+        Ok(true)
+    }
+
+    fn parse_function_definition_nonterminal(&mut self) -> ParseResult<CommandAst> {
+        let name = self.parse_function_name_nonterminal()?;
+        let _left_paren = self.consume_operator_kind(OperatorKind::LeftParen)?;
+        let _right_paren = self.consume_operator_kind(OperatorKind::RightParen)?;
+        self.parse_linebreak()?;
+
+        let (body, redirects, body_span) = self.parse_function_body_nonterminal()?;
+        let span = redirects
+            .last()
+            .map(|redirect| merge_spans(name.span, redirect.span))
+            .unwrap_or_else(|| merge_spans(name.span, body_span));
+
+        let function = self.build_function_definition(name, body, redirects, span)?;
+        self.build_command_function_definition(function)
+    }
+
+    fn parse_function_body_nonterminal(
+        &mut self,
+    ) -> ParseResult<(CommandAst, Vec<RedirectAst>, Span)> {
+        self.with_function_body_rule9(|parser| {
+            let (kind, payload_span) = parser.parse_compound_payload_nonterminal()?;
+            let compound = parser.build_compound_command_node(kind, Vec::new(), payload_span)?;
+            let body = parser.build_command_compound(compound)?;
+            let redirects = parser.parse_redirect_list_nonterminal()?;
+            let span = redirects
+                .last()
+                .map(|redirect| merge_spans(payload_span, redirect.span))
+                .unwrap_or(payload_span);
+            Ok((body, redirects, span))
+        })
+    }
+
+    fn parse_function_name_nonterminal(&mut self) -> ParseResult<WordAst> {
+        let token = self
+            .peek_token(0)?
+            .ok_or_else(|| ParseFailure::Error(ParseError::unexpected_end_of_input(["NAME"])))?;
+        if token.kind != TokenKind::Token {
+            return Err(ParseFailure::Error(ParseError::unexpected_token(
+                &token,
+                ["NAME"],
+            )));
+        }
+
+        let classified = self.classify_token_at(
+            0,
+            ClassificationContext {
+                reserved_word_policy: ReservedWordPolicy::Any,
+                name_context: NameContext::FunctionName,
+                ..Default::default()
+            },
+        )?;
+        if classified != ClassifiedTokenKind::Name {
+            return Err(ParseFailure::Error(ParseError::unexpected_token(
+                &token,
+                ["NAME"],
+            )));
+        }
+
+        let token = self
+            .next_token()?
+            .ok_or_else(|| ParseFailure::Error(ParseError::unexpected_end_of_input(["NAME"])))?;
+        self.build_word(token)
     }
 
     fn parse_linebreak(&mut self) -> ParseResult<()> {
@@ -1181,6 +1247,20 @@ impl<'a> Parser<'a> {
         ))
     }
 
+    fn with_function_body_rule9<T>(
+        &mut self,
+        parse: impl FnOnce(&mut Self) -> ParseResult<T>,
+    ) -> ParseResult<T> {
+        self.function_body_rule9_depth += 1;
+        let result = parse(self);
+        self.function_body_rule9_depth -= 1;
+        result
+    }
+
+    fn in_function_body_mode(&self) -> bool {
+        self.function_body_rule9_depth > 0
+    }
+
     fn build_word(&mut self, token: Token) -> ParseResult<WordAst> {
         let mut builder = AstBuilder::new(&mut self.arena);
         builder.word_from_token(token).map_err(ParseFailure::Error)
@@ -1361,6 +1441,29 @@ impl<'a> Parser<'a> {
         let mut builder = AstBuilder::new(&mut self.arena);
         builder
             .command_compound(command)
+            .map_err(ParseFailure::Error)
+    }
+
+    fn build_function_definition(
+        &mut self,
+        name: WordAst,
+        body: CommandAst,
+        redirects: Vec<RedirectAst>,
+        span: Span,
+    ) -> ParseResult<FunctionDefinitionAst> {
+        let mut builder = AstBuilder::new(&mut self.arena);
+        builder
+            .function_definition(name, body, redirects, span)
+            .map_err(ParseFailure::Error)
+    }
+
+    fn build_command_function_definition(
+        &mut self,
+        function: FunctionDefinitionAst,
+    ) -> ParseResult<CommandAst> {
+        let mut builder = AstBuilder::new(&mut self.arena);
+        builder
+            .command_function_definition(function)
             .map_err(ParseFailure::Error)
     }
 

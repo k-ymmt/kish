@@ -1,7 +1,7 @@
 use kish::lexer::{Lexer, LexerMode, OperatorKind, SourceId};
 use kish::parser::{
-    CaseTerminatorAst, CommandAst, CompoundCommandAst, CompoundCommandNodeAst, ListAst,
-    ParseErrorKind, ParseOptions, ParseStep, Parser, TokenStream,
+    CaseTerminatorAst, CommandAst, CompoundCommandAst, CompoundCommandNodeAst,
+    FunctionDefinitionAst, ListAst, ParseErrorKind, ParseOptions, ParseStep, Parser, TokenStream,
 };
 
 fn parser_for(input: &str, options: ParseOptions) -> Parser<'_> {
@@ -44,6 +44,19 @@ fn first_compound(step: &ParseStep) -> &CompoundCommandNodeAst {
     match pipeline.commands.first().expect("command exists") {
         CommandAst::Compound(compound) => compound,
         other => panic!("expected compound command, got {other:?}"),
+    }
+}
+
+fn first_function_definition(step: &ParseStep) -> &FunctionDefinitionAst {
+    let ParseStep::Complete(command) = step else {
+        panic!("expected ParseStep::Complete");
+    };
+
+    let and_or = command.list.and_ors.first().expect("and_or exists");
+    let pipeline = &and_or.head;
+    match pipeline.commands.first().expect("command exists") {
+        CommandAst::FunctionDefinition(function) => function,
+        other => panic!("expected function definition, got {other:?}"),
     }
 }
 
@@ -326,14 +339,124 @@ fn redirect_missing_target_reports_deterministic_error() {
 }
 
 #[test]
-fn function_definition_head_is_detected_and_deferred() {
+fn function_definition_parses_brace_group_body() {
+    let step = parse_one("foo() { echo hi; }\n");
+    let function = first_function_definition(&step);
+
+    assert_eq!(function.name.token.lexeme, "foo");
+    assert!(function.redirects.is_empty());
+    assert_eq!(function.span.start, function.name.span.start);
+
+    let CommandAst::Compound(compound_body) = function.body.as_ref() else {
+        panic!("expected compound body");
+    };
+    assert!(matches!(
+        compound_body.kind,
+        CompoundCommandAst::BraceGroup(_)
+    ));
+    assert!(compound_body.redirects.is_empty());
+    assert_eq!(function.span.end, compound_body.span.end);
+}
+
+#[test]
+fn function_definition_parses_subshell_body_after_linebreak() {
+    let step = parse_one("foo()\n(\n echo hi\n)\n");
+    let function = first_function_definition(&step);
+
+    let CommandAst::Compound(compound_body) = function.body.as_ref() else {
+        panic!("expected compound body");
+    };
+    assert!(matches!(
+        compound_body.kind,
+        CompoundCommandAst::Subshell(_)
+    ));
+    assert!(function.redirects.is_empty());
+}
+
+#[test]
+fn function_definition_redirects_attach_to_function_body_wrapper() {
+    let step = parse_one("foo() { echo; } >out 2>&1\n");
+    let function = first_function_definition(&step);
+
+    assert_eq!(function.redirects.len(), 2);
+    assert_eq!(function.redirects[0].operator, OperatorKind::Greater);
+    assert_eq!(function.redirects[0].target.token.lexeme, "out");
+    assert_eq!(function.redirects[1].operator, OperatorKind::DupOutput);
+    assert_eq!(function.redirects[1].target.token.lexeme, "1");
+    assert_eq!(
+        function.redirects[1]
+            .fd_or_location
+            .as_ref()
+            .map(|token| token.lexeme.as_str()),
+        Some("2")
+    );
+
+    let CommandAst::Compound(compound_body) = function.body.as_ref() else {
+        panic!("expected compound body");
+    };
+    assert!(compound_body.redirects.is_empty());
+    assert_eq!(function.span.end, function.redirects[1].span.end);
+}
+
+#[test]
+fn function_body_rule9_keeps_assignment_like_tokens_as_words() {
+    let step = parse_one("foo() { VAR=1; }\n");
+    let function = first_function_definition(&step);
+
+    let CommandAst::Compound(compound_body) = function.body.as_ref() else {
+        panic!("expected compound body");
+    };
+    let CompoundCommandAst::BraceGroup(list) = &compound_body.kind else {
+        panic!("expected brace-group body");
+    };
+
+    let simple = first_simple_in_list(list);
+    assert!(simple.assignments.is_empty());
+    let lexemes: Vec<&str> = simple
+        .words
+        .iter()
+        .map(|word| word.token.lexeme.as_str())
+        .collect();
+    assert_eq!(lexemes, vec!["VAR=1"]);
+}
+
+#[test]
+fn function_definition_missing_body_fails() {
     let mut parser = parser_for("foo()\n", ParseOptions::default());
     let error = parser
         .parse_complete_command()
-        .expect_err("function definitions are deferred to phase 7");
+        .expect_err("function body is required");
 
-    assert_eq!(error.kind, ParseErrorKind::GrammarNotImplemented);
-    assert_eq!(error.found.as_deref(), Some("foo"));
+    assert!(matches!(
+        error.kind,
+        ParseErrorKind::UnexpectedEndOfInput | ParseErrorKind::UnexpectedToken
+    ));
+}
+
+#[test]
+fn function_definition_requires_compound_body() {
+    let mut parser = parser_for("foo() echo\n", ParseOptions::default());
+    let error = parser
+        .parse_complete_command()
+        .expect_err("function body must be compound command");
+
+    assert!(matches!(
+        error.kind,
+        ParseErrorKind::UnexpectedEndOfInput | ParseErrorKind::UnexpectedToken
+    ));
+}
+
+#[test]
+fn non_name_function_head_is_not_accepted() {
+    let mut parser = parser_for("foo-bar() { echo; }\n", ParseOptions::default());
+    let error = parser
+        .parse_complete_command()
+        .expect_err("invalid function names should not parse");
+
+    assert!(matches!(
+        error.kind,
+        ParseErrorKind::UnexpectedEndOfInput | ParseErrorKind::UnexpectedToken
+    ));
 }
 
 #[test]

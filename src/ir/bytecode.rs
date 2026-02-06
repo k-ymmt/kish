@@ -106,6 +106,10 @@ pub enum Instruction {
     CaseTestPattern(WordProgramId),
     /// Clears stored case subject.
     CaseClear,
+    /// Pushes a new redirect scope (saves current fd state).
+    PushRedirectScope,
+    /// Pops the current redirect scope (restores previous fd state).
+    PopRedirectScope,
 }
 
 /// Word-expansion subprogram operation.
@@ -129,6 +133,21 @@ pub enum WordProgramOp {
     QuoteRemoval,
 }
 
+/// How a redirect opens its target file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OpenMode {
+    /// Read-only (`<`).
+    ReadOnly,
+    /// Write, create, truncate (`>`).
+    WriteCreate,
+    /// Write, create, append (`>>`).
+    Append,
+    /// Read-write, create (`<>`).
+    ReadWrite,
+    /// Write, create, truncate, ignore noclobber (`>|`).
+    Clobber,
+}
+
 /// Redirect-evaluation subprogram operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RedirectProgramOp {
@@ -138,6 +157,8 @@ pub enum RedirectProgramOp {
         fd: u16,
         /// Expansion program for path operand.
         target: WordProgramId,
+        /// How to open the file.
+        mode: OpenMode,
     },
     /// Duplicates one descriptor to another.
     Dup {

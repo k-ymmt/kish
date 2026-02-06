@@ -9,5 +9,6 @@ mod hir_contracts;
 mod hir_mapping_exhaustive;
 mod lower_from_parser;
 mod pooling_interning;
+mod redirect_program_lowering;
 mod vm_ir_contracts;
 mod word_program_lowering;

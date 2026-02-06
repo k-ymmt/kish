@@ -11,11 +11,12 @@ use crate::ir::hir::{
     HirFunctionDefinition, HirIfClause, HirList, HirListTerminator, HirPipeline, HirProgram,
     HirSimpleCommand, HirUntilClause, HirWhileClause, HirWord,
 };
-use crate::ir::ids::{CodeObjectId, RedirectProgramId};
+use crate::ir::ids::CodeObjectId;
+use crate::ir::lower::redirect_program::lower_redirect_to_program;
 use crate::ir::lower::word_program::{
     lower_assignment_value_to_program, lower_word_to_program, WordContext,
 };
-use crate::ir::program::{CodeObjectBuilder, IrModuleBuilder, RedirectProgram};
+use crate::ir::program::{CodeObjectBuilder, IrModuleBuilder};
 
 // ---------------------------------------------------------------------------
 // EmitContext
@@ -227,13 +228,24 @@ fn emit_command(
 // Compound command node (with redirects)
 // ---------------------------------------------------------------------------
 
-/// Emits a compound command node. Redirects are ignored (Phase 8).
+/// Emits a compound command node with optional redirect scope.
 fn emit_compound_command_node(
     builder: &mut CodeObjectBuilder,
     ctx: &mut EmitContext<'_>,
     node: &HirCompoundCommandNode,
 ) -> Result<(), IrError> {
-    emit_compound_command(builder, ctx, &node.kind)
+    if node.redirects.is_empty() {
+        emit_compound_command(builder, ctx, &node.kind)
+    } else {
+        builder.emit(Instruction::PushRedirectScope)?;
+        for redir in &node.redirects {
+            let rp = lower_redirect_to_program(ctx, redir)?;
+            builder.emit(Instruction::AddRedir(rp))?;
+        }
+        emit_compound_command(builder, ctx, &node.kind)?;
+        builder.emit(Instruction::PopRedirectScope)?;
+        Ok(())
+    }
 }
 
 /// Emits a compound command body.
@@ -508,18 +520,50 @@ fn emit_case(
 // ---------------------------------------------------------------------------
 
 /// Emits a function definition.
+///
+/// POSIX: `fname() compound_command redirect_list` — the redirect_list applies
+/// each time the function is called, so redirects are embedded in the function
+/// body's code object.
 fn emit_function_definition(
     builder: &mut CodeObjectBuilder,
     ctx: &mut EmitContext<'_>,
     func: &HirFunctionDefinition,
 ) -> Result<(), IrError> {
-    let body_co_id = compile_compound_as_code_object(ctx, &func.body)?;
+    let body_co_id = if func.redirects.is_empty() {
+        compile_compound_as_code_object(ctx, &func.body)?
+    } else {
+        compile_function_body_with_redirects(ctx, func)?
+    };
     let name_sym = ctx.module().intern_symbol(&func.name.token.lexeme)?;
     builder.emit(Instruction::DefineFunction {
         name: name_sym,
         body: body_co_id,
     })?;
     Ok(())
+}
+
+/// Compiles a function body wrapped with redirect scope for function-level redirects.
+fn compile_function_body_with_redirects(
+    ctx: &mut EmitContext<'_>,
+    func: &HirFunctionDefinition,
+) -> Result<CodeObjectId, IrError> {
+    let co_id = ctx.module().add_code_object(
+        CodeObjectBuilder::new(CodeObjectId::default()).finalize()?,
+    )?;
+    let mut body_builder = CodeObjectBuilder::new(co_id);
+
+    body_builder.emit(Instruction::PushRedirectScope)?;
+    for redir in &func.redirects {
+        let rp = lower_redirect_to_program(ctx, redir)?;
+        body_builder.emit(Instruction::AddRedir(rp))?;
+    }
+    emit_compound_command_node(&mut body_builder, ctx, &func.body)?;
+    body_builder.emit(Instruction::PopRedirectScope)?;
+    body_builder.emit(Instruction::Ret)?;
+
+    let co = body_builder.finalize()?;
+    ctx.module().replace_code_object(co_id, co)?;
+    Ok(co_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -606,8 +650,8 @@ fn emit_simple_command(
     }
 
     // Emit redirects.
-    for _redir in &simple.redirects {
-        let rp = stub_redirect_program(ctx)?;
+    for redir in &simple.redirects {
+        let rp = lower_redirect_to_program(ctx, redir)?;
         builder.emit(Instruction::AddRedir(rp))?;
     }
 
@@ -658,15 +702,6 @@ fn is_posix_special_builtin(name: &str) -> bool {
             | "trap"
             | "unset"
     )
-}
-
-// ---------------------------------------------------------------------------
-// Helper: stub redirect program
-// ---------------------------------------------------------------------------
-
-/// Creates a stub (empty) redirect program as a Phase 8 placeholder.
-fn stub_redirect_program(ctx: &mut EmitContext<'_>) -> Result<RedirectProgramId, IrError> {
-    ctx.module().add_redirect_program(RedirectProgram::default())
 }
 
 // ---------------------------------------------------------------------------

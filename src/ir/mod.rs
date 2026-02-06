@@ -14,7 +14,7 @@ pub mod verify;
 
 pub use bytecode::{
     ArithProgramOp, BranchTarget, CommandDispatchHint, EncodedCodeObject, EncodedModule,
-    Instruction, RedirectProgramOp, WordProgramOp,
+    Instruction, OpenMode, RedirectProgramOp, WordProgramOp,
 };
 pub use encode::encode_module;
 pub use error::{IrError, IrErrorKind};

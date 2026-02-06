@@ -1,10 +1,26 @@
 //! Typed VM IR instruction contracts and encoded bytecode containers.
 
 use crate::ir::ids::{
-    ArithProgramId, CodeObjectId, ConstId, LabelId, LocalId, RedirectProgramId, StringId, SymbolId,
+    ArithProgramId, CodeObjectId, ConstId, LocalId, RedirectProgramId, StringId, SymbolId,
     WordProgramId,
 };
 use crate::ir::program::ConstValue;
+
+/// Absolute branch destination represented as instruction index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct BranchTarget(u32);
+
+impl BranchTarget {
+    /// Creates a branch target from an absolute instruction index.
+    pub const fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    /// Returns the absolute instruction index.
+    pub const fn index(self) -> u32 {
+        self.0
+    }
+}
 
 /// Typed VM instruction stream used before packing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,6 +29,12 @@ pub enum Instruction {
     Nop,
     /// Pushes a constant onto the VM stack.
     PushConst(ConstId),
+    /// Pushes an immediate integer onto the VM stack.
+    PushInt(i64),
+    /// Pushes an interned string reference onto the VM stack.
+    PushString(StringId),
+    /// Pushes an interned symbol reference onto the VM stack.
+    PushSymbol(SymbolId),
     /// Pops one stack value.
     Drop,
     /// Duplicates the stack top.
@@ -22,11 +44,11 @@ pub enum Instruction {
     /// Stores stack top into a local.
     LocalSet(LocalId),
     /// Unconditional branch.
-    Jmp(LabelId),
+    Jmp(BranchTarget),
     /// Branch if top-of-stack is zero.
-    JmpIfZero(LabelId),
+    JmpIfZero(BranchTarget),
     /// Branch if top-of-stack is non-zero.
-    JmpIfNonZero(LabelId),
+    JmpIfNonZero(BranchTarget),
     /// Calls another code object.
     Call(CodeObjectId),
     /// Returns from current code object.
@@ -39,6 +61,8 @@ pub enum Instruction {
     AddAssign(SymbolId, WordProgramId),
     /// Adds one redirect subprogram.
     AddRedir(RedirectProgramId),
+    /// Ends simple command assembly.
+    EndSimple,
     /// Executes assembled simple command.
     ExecSimple,
 }

@@ -1,4 +1,7 @@
-use kish::ir::{IrErrorKind, IrModule, IrOptions, LoweringContext, encode_module, verify_module};
+use kish::ir::{
+    BranchTarget, CodeObjectBuilder, CodeObjectId, IrErrorKind, IrModule, IrOptions,
+    LoweringContext, encode_module, verify_module,
+};
 use kish::lexer::{Lexer, LexerMode, SourceId};
 use kish::parser::{ParseOptions, ParseStep, Parser, TokenStream};
 
@@ -76,4 +79,10 @@ fn encode_and_verify_public_contracts_exist() {
 
     let verify_error = verify_module(&module).expect_err("Phase 0 verifier should be stubbed");
     assert_eq!(verify_error.kind, IrErrorKind::UnsupportedForm);
+}
+
+#[test]
+fn vm_ir_builder_api_is_reachable() {
+    let _target = BranchTarget::new(0);
+    let _builder = CodeObjectBuilder::new(CodeObjectId::new(0));
 }

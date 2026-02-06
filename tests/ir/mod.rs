@@ -1,5 +1,9 @@
+mod branch_patch_determinism;
+mod code_object_builder_negative;
+mod code_object_builder_positive;
 mod contracts;
 mod hir_builder_negative;
 mod hir_builder_positive;
 mod hir_contracts;
 mod hir_mapping_exhaustive;
+mod vm_ir_contracts;

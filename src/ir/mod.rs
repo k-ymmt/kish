@@ -13,7 +13,8 @@ pub mod program;
 pub mod verify;
 
 pub use bytecode::{
-    ArithProgramOp, EncodedCodeObject, EncodedModule, Instruction, RedirectProgramOp, WordProgramOp,
+    ArithProgramOp, BranchTarget, EncodedCodeObject, EncodedModule, Instruction, RedirectProgramOp,
+    WordProgramOp,
 };
 pub use encode::encode_module;
 pub use error::{IrError, IrErrorKind};
@@ -31,6 +32,7 @@ pub use ids::{
 };
 pub use lower::LoweringContext;
 pub use program::{
-    ArithProgram, CodeObject, ConstValue, IrModule, IrOptions, RedirectProgram, WordProgram,
+    ArithProgram, CodeObject, CodeObjectBuilder, ConstValue, IrModule, IrOptions, RedirectProgram,
+    WordProgram,
 };
 pub use verify::verify_module;

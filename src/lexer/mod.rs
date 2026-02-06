@@ -1,8 +1,8 @@
 //! POSIX-oriented lexer module.
 //!
-//! Phase 2 keeps tokenization semantics minimal while adding cursor utilities:
-//! byte/line/column tracking, checkpoint/rollback, and unquoted line-join
-//! handling for `\\\n`.
+//! Phase 3 adds core operator and boundary tokenization:
+//! longest-match operators, token-start comments, newline preservation, and
+//! quote-aware boundary protection with deferred quote semantics.
 
 pub mod diagnostics;
 pub mod span;
@@ -17,7 +17,10 @@ mod scanner;
 mod substitution;
 
 use crate::lexer::cursor::Cursor;
-use crate::lexer::scanner::{QuoteContext, consume_line_continuation_if_unquoted};
+use crate::lexer::operator::{has_operator_prefix, scan_operator};
+use crate::lexer::scanner::{
+    QuoteContext, consume_line_continuation_if_unquoted, is_comment_start,
+};
 
 pub use diagnostics::{DiagnosticCode, FatalLexError, LexDiagnostic, RecoverableLexError};
 pub use span::{ByteOffset, SourceId, Span};
@@ -29,7 +32,7 @@ pub use token::{
 
 /// Lexer mode used to control tokenization state.
 ///
-/// In Phase 2 these modes are still state markers only.
+/// In Phase 3 these modes are still state markers only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LexerMode {
     /// Ordinary token recognition mode.
@@ -42,11 +45,12 @@ pub enum LexerMode {
 
 /// A POSIX-first lexer with placeholder scanning behavior.
 ///
-/// The implementation is intentionally simple and deterministic:
-/// - returns raw word tokens split on ASCII whitespace
-/// - emits newline tokens
+/// Phase 3 behavior:
+/// - recognizes longest-match operators
+/// - preserves newline tokens
 /// - removes unquoted `\\\n` before token delimiting
-/// - does not implement operator, quote, substitution, or here-doc semantics yet
+/// - applies token-start `#` comment skipping
+/// - uses quote-aware boundary protection only (full quote semantics deferred)
 pub struct Lexer<'a> {
     input: &'a str,
     mode: LexerMode,
@@ -72,10 +76,11 @@ impl<'a> Lexer<'a> {
 
     /// Scans and returns the next lexical step.
     ///
-    /// Phase 2 behavior:
+    /// Phase 3 behavior:
     /// - returns [`LexStep::EndOfInput`] once all input is consumed
     /// - emits one [`TokenKind::Newline`] per `\n`
-    /// - emits one [`TokenKind::Token`] for contiguous non-whitespace bytes
+    /// - emits [`TokenKind::Operator`] using longest-match rules
+    /// - emits one [`TokenKind::Token`] for contiguous non-delimiter bytes
     /// - removes unquoted line continuations (`\\\n`) while scanning
     pub fn next_token(&mut self) -> Result<LexStep, FatalLexError> {
         self.skip_horizontal_whitespace();
@@ -84,55 +89,101 @@ impl<'a> Lexer<'a> {
             return Ok(LexStep::EndOfInput);
         }
 
-        let start = self.cursor.offset();
-        match self.cursor.peek_byte(self.input) {
-            Some(b'\n') => {
-                let _ = self.cursor.advance_byte(self.input);
-                let end = self.cursor.offset();
-                Ok(LexStep::Token(Token::new(
-                    TokenKind::Newline,
-                    "\n".to_string(),
-                    Span::new(self.source_id, start, end),
-                )))
+        if self.try_skip_comment_until_newline() {
+            if self.cursor.peek_byte(self.input) == Some(b'\n') {
+                return self.emit_newline_token();
             }
-            Some(_) => {
-                let mut quote_context = QuoteContext::default();
-                let mut lexeme_bytes = Vec::new();
-
-                while !self.cursor.is_eof(self.input) {
-                    if consume_line_continuation_if_unquoted(
-                        &mut self.cursor,
-                        self.input,
-                        &mut quote_context,
-                    ) {
-                        continue;
-                    }
-
-                    let Some(byte) = self.cursor.peek_byte(self.input) else {
-                        break;
-                    };
-                    if byte.is_ascii_whitespace() {
-                        break;
-                    }
-
-                    let consumed = self
-                        .cursor
-                        .advance_byte(self.input)
-                        .expect("peeked byte must be consumable");
-                    quote_context.observe_consumed_byte(consumed);
-                    lexeme_bytes.push(consumed);
-                }
-
-                let end = self.cursor.offset();
-                let lexeme = String::from_utf8(lexeme_bytes).expect("input is valid UTF-8");
-                Ok(LexStep::Token(Token::new(
-                    TokenKind::Token,
-                    lexeme,
-                    Span::new(self.source_id, start, end),
-                )))
-            }
-            None => Ok(LexStep::EndOfInput),
+            return Ok(LexStep::EndOfInput);
         }
+
+        if self.cursor.peek_byte(self.input) == Some(b'\n') {
+            return self.emit_newline_token();
+        }
+
+        if let Some(operator_scan) = scan_operator(&mut self.cursor, self.input) {
+            return Ok(LexStep::Token(Token::new(
+                TokenKind::Operator(operator_scan.kind),
+                operator_scan.lexeme,
+                Span::new(self.source_id, operator_scan.start, operator_scan.end),
+            )));
+        }
+
+        self.scan_word_token()
+    }
+
+    fn emit_newline_token(&mut self) -> Result<LexStep, FatalLexError> {
+        let start = self.cursor.offset();
+        let _ = self.cursor.advance_byte(self.input);
+        let end = self.cursor.offset();
+        Ok(LexStep::Token(Token::new(
+            TokenKind::Newline,
+            "\n".to_string(),
+            Span::new(self.source_id, start, end),
+        )))
+    }
+
+    fn scan_word_token(&mut self) -> Result<LexStep, FatalLexError> {
+        let start = self.cursor.offset();
+        let mut quote_context = QuoteContext::default();
+        let mut lexeme_bytes = Vec::new();
+        let mut previous_byte: Option<u8> = None;
+
+        while !self.cursor.is_eof(self.input) {
+            if consume_line_continuation_if_unquoted(
+                &mut self.cursor,
+                self.input,
+                &mut quote_context,
+            ) {
+                previous_byte = None;
+                continue;
+            }
+
+            let Some(byte) = self.cursor.peek_byte(self.input) else {
+                break;
+            };
+
+            if quote_context.is_unquoted()
+                && (byte.is_ascii_whitespace() || has_operator_prefix(&self.cursor, self.input))
+            {
+                break;
+            }
+
+            let next_byte = self.cursor.peek_next_byte(self.input);
+            let consumed = self
+                .cursor
+                .advance_byte(self.input)
+                .expect("peeked byte must be consumable");
+            quote_context.observe_byte_for_boundary(consumed, previous_byte, next_byte);
+            lexeme_bytes.push(consumed);
+            previous_byte = Some(consumed);
+        }
+
+        let end = self.cursor.offset();
+        let lexeme = String::from_utf8(lexeme_bytes).expect("input is valid UTF-8");
+        Ok(LexStep::Token(Token::new(
+            TokenKind::Token,
+            lexeme,
+            Span::new(self.source_id, start, end),
+        )))
+    }
+
+    fn try_skip_comment_until_newline(&mut self) -> bool {
+        let Some(byte) = self.cursor.peek_byte(self.input) else {
+            return false;
+        };
+        if !is_comment_start(byte, true, QuoteContext::default()) {
+            return false;
+        }
+
+        loop {
+            match self.cursor.peek_byte(self.input) {
+                Some(b'\n') | None => break,
+                Some(_) => {
+                    let _ = self.cursor.advance_byte(self.input);
+                }
+            }
+        }
+        true
     }
 
     /// Tokenizes up to the current complete-command boundary.
@@ -190,28 +241,37 @@ impl<'a> Lexer<'a> {
             if byte == b'\n' || !byte.is_ascii_whitespace() {
                 break;
             }
-            let _ = self.cursor.advance_byte(self.input);
+            let next_byte = self.cursor.peek_next_byte(self.input);
+            let consumed = self
+                .cursor
+                .advance_byte(self.input)
+                .expect("peeked byte must be consumable");
+            quote_context.observe_byte_for_boundary(consumed, None, next_byte);
         }
     }
 
     fn detect_incomplete_input_reason(&self) -> Option<NeedMoreReason> {
         let mut probe = self.cursor;
         let mut quote_context = QuoteContext::default();
+        let mut previous_byte: Option<u8> = None;
         let mut saw_unquoted_trailing_backslash = false;
 
         while !probe.is_eof(self.input) {
             if consume_line_continuation_if_unquoted(&mut probe, self.input, &mut quote_context) {
                 saw_unquoted_trailing_backslash = false;
+                previous_byte = None;
                 continue;
             }
 
+            let next_byte = probe.peek_next_byte(self.input);
             let Some(byte) = probe.advance_byte(self.input) else {
                 break;
             };
 
             saw_unquoted_trailing_backslash =
                 quote_context.is_unquoted() && byte == b'\\' && probe.is_eof(self.input);
-            quote_context.observe_consumed_byte(byte);
+            quote_context.observe_byte_for_boundary(byte, previous_byte, next_byte);
+            previous_byte = Some(byte);
         }
 
         if saw_unquoted_trailing_backslash {

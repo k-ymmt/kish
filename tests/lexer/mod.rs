@@ -3,10 +3,14 @@
 pub mod span;
 
 mod boundary_api;
+mod comment_handling;
 mod constructor_mode;
 mod cursor_position;
 mod error_types;
 mod line_continuation;
+mod newline_preservation;
 mod next_token_behavior;
+mod operator_scanning;
 mod source_span_types;
 mod token_model;
+mod word_boundaries;

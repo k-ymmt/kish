@@ -3,6 +3,7 @@
 pub mod span;
 
 mod boundary_api;
+mod alias_substitution;
 mod comment_handling;
 mod constructor_mode;
 mod cursor_position;

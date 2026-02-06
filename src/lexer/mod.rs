@@ -38,6 +38,10 @@ use std::mem;
 
 pub use diagnostics::{DiagnosticCode, FatalLexError, LexDiagnostic, RecoverableLexError};
 pub use heredoc::HereDocBodyCapture;
+pub use alias::{
+    AliasExpandedToken, AliasExpander, AliasExpansionError, AliasExpansionOptions,
+    AliasExpansionResult, AliasTokenOrigin,
+};
 pub use span::{ByteOffset, SourceId, Span};
 pub use token::{
     BoundaryResult, CompleteCommandTokens, DelimiterContext, LexStep, NeedMoreInput,

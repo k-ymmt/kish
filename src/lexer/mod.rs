@@ -40,9 +40,10 @@ pub use diagnostics::{DiagnosticCode, FatalLexError, LexDiagnostic, RecoverableL
 pub use heredoc::HereDocBodyCapture;
 pub use span::{ByteOffset, SourceId, Span};
 pub use token::{
-    BoundaryResult, CompleteCommandTokens, LexStep, NeedMoreInput, NeedMoreReason, OperatorKind,
-    QuoteMarker, QuoteProvenance, SubstitutionKind, SubstitutionMarker, Token, TokenKind,
-    TokenOffset, TokenRange,
+    BoundaryResult, CompleteCommandTokens, DelimiterContext, LexStep, NeedMoreInput,
+    NeedMoreReason, OperatorKind, ParserClassificationOptions, ParserTokenClass, QuoteMarker,
+    QuoteProvenance, SubstitutionKind, SubstitutionMarker, Token, TokenKind, TokenOffset,
+    TokenRange,
 };
 
 /// Lexer mode used to control tokenization state.

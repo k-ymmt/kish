@@ -92,6 +92,56 @@ impl OperatorKind {
             Self::Greater => ">",
         }
     }
+
+    /// Returns parser delimiter context when this operator can delimit IO forms.
+    pub const fn delimiter_context(self) -> Option<DelimiterContext> {
+        match self {
+            Self::Less
+            | Self::HereDoc
+            | Self::HereDocStripTabs
+            | Self::DupInput
+            | Self::ReadWrite => Some(DelimiterContext::Less),
+            Self::Greater | Self::AppendOutput | Self::DupOutput | Self::Clobber => {
+                Some(DelimiterContext::Greater)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Parser delimiter context used for lexical post-classification hooks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DelimiterContext {
+    /// Delimited by a `<`-family operator.
+    Less,
+    /// Delimited by a `>`-family operator.
+    Greater,
+}
+
+/// Parser-side class for context-sensitive token conversion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ParserTokenClass {
+    /// Raw `TOKEN` class.
+    Token,
+    /// `IO_NUMBER` class.
+    IoNumber,
+    /// `IO_LOCATION` class.
+    IoLocation,
+}
+
+/// Options for parser-side lexical post-classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ParserClassificationOptions {
+    /// Enables optional `IO_LOCATION` conversion.
+    pub allow_io_location: bool,
+}
+
+impl Default for ParserClassificationOptions {
+    fn default() -> Self {
+        Self {
+            allow_io_location: false,
+        }
+    }
 }
 
 /// Token-relative byte offset.
@@ -319,6 +369,39 @@ impl Token {
         }
 
         chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    }
+
+    /// Classifies token in parser context with default conversion options.
+    pub fn classify_for_parser(
+        &self,
+        delimiter: Option<DelimiterContext>,
+    ) -> ParserTokenClass {
+        self.classify_for_parser_with_options(delimiter, ParserClassificationOptions::default())
+    }
+
+    /// Classifies token in parser context with explicit conversion options.
+    pub fn classify_for_parser_with_options(
+        &self,
+        delimiter: Option<DelimiterContext>,
+        options: ParserClassificationOptions,
+    ) -> ParserTokenClass {
+        if self.kind != TokenKind::Token || !self.is_plain() {
+            return ParserTokenClass::Token;
+        }
+
+        if delimiter.is_none() {
+            return ParserTokenClass::Token;
+        }
+
+        if self.io_number_candidate().is_some() {
+            return ParserTokenClass::IoNumber;
+        }
+
+        if options.allow_io_location && self.is_io_location_candidate() {
+            return ParserTokenClass::IoLocation;
+        }
+
+        ParserTokenClass::Token
     }
 }
 

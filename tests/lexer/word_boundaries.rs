@@ -73,3 +73,17 @@ fn mixed_stream_order_is_preserved() {
         ]
     );
 }
+
+#[test]
+fn io_number_like_text_stays_raw_token_in_lexer_stream() {
+    let tokens = collect_tokens("2>file\n");
+    assert_eq!(
+        tokens,
+        vec![
+            (TokenKind::Token, "2".to_string()),
+            (TokenKind::Operator(OperatorKind::Greater), ">".to_string()),
+            (TokenKind::Token, "file".to_string()),
+            (TokenKind::Newline, "\n".to_string()),
+        ]
+    );
+}

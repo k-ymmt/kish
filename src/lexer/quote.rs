@@ -94,24 +94,18 @@ pub(crate) fn unterminated_quote_error(
     match open.kind {
         OpenQuoteKind::Single => FatalLexError::UnterminatedSingleQuote(LexDiagnostic::new(
             DiagnosticCode::UnterminatedSingleQuote,
-            format!(
-                "unterminated single quote starting near `{context}`"
-            ),
+            format!("unterminated single quote starting near `{context}`"),
             span,
         )),
         OpenQuoteKind::Double => FatalLexError::UnterminatedDoubleQuote(LexDiagnostic::new(
             DiagnosticCode::UnterminatedDoubleQuote,
-            format!(
-                "unterminated double quote starting near `{context}`"
-            ),
+            format!("unterminated double quote starting near `{context}`"),
             span,
         )),
         OpenQuoteKind::DollarSingle => {
             FatalLexError::UnterminatedDollarSingleQuote(LexDiagnostic::new(
                 DiagnosticCode::UnterminatedDollarSingleQuote,
-                format!(
-                    "unterminated dollar-single quote starting near `{context}`"
-                ),
+                format!("unterminated dollar-single quote starting near `{context}`"),
                 span,
             ))
         }

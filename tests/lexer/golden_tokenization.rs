@@ -22,12 +22,8 @@ fn load_case_input(case: &str) -> String {
 
 fn load_case_expected(case: &str) -> String {
     let path = fixture_path(case, "golden");
-    fs::read_to_string(&path).unwrap_or_else(|error| {
-        panic!(
-            "failed to read golden fixture {}: {error}",
-            path.display()
-        )
-    })
+    fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("failed to read golden fixture {}: {error}", path.display()))
 }
 
 fn render_operator_kind(kind: OperatorKind) -> &'static str {
@@ -80,7 +76,11 @@ fn render_substitution_kind(kind: SubstitutionKind) -> &'static str {
 }
 
 fn render_lexeme(token: &Token) -> String {
-    token.lexeme.chars().flat_map(|ch| ch.escape_default()).collect()
+    token
+        .lexeme
+        .chars()
+        .flat_map(|ch| ch.escape_default())
+        .collect()
 }
 
 fn render_quote_markers(markers: &[QuoteMarker]) -> String {
@@ -98,9 +98,7 @@ fn render_quote_markers(markers: &[QuoteMarker]) -> String {
             )
         })
         .collect();
-    entries.sort_by(|left, right| {
-        (left.0, left.1, left.2).cmp(&(right.0, right.1, right.2))
-    });
+    entries.sort_by(|left, right| (left.0, left.1, left.2).cmp(&(right.0, right.1, right.2)));
 
     entries
         .into_iter()
@@ -124,9 +122,7 @@ fn render_substitution_markers(markers: &[SubstitutionMarker]) -> String {
             )
         })
         .collect();
-    entries.sort_by(|left, right| {
-        (left.0, left.1, left.2).cmp(&(right.0, right.1, right.2))
-    });
+    entries.sort_by(|left, right| (left.0, left.1, left.2).cmp(&(right.0, right.1, right.2)));
 
     entries
         .into_iter()

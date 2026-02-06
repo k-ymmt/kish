@@ -34,7 +34,10 @@ fn lexer_stream_remains_raw_token_operator_newline_only() {
     }
 
     assert_eq!(tokens[0].kind, TokenKind::Token);
-    assert_eq!(tokens[1].kind, TokenKind::Operator(kish::lexer::OperatorKind::Greater));
+    assert_eq!(
+        tokens[1].kind,
+        TokenKind::Operator(kish::lexer::OperatorKind::Greater)
+    );
 }
 
 #[test]

@@ -4,3 +4,4 @@
 //! stable contracts before full lexical semantics are implemented.
 
 pub mod lexer;
+pub mod parser;

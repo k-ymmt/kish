@@ -1,4 +1,7 @@
 //! Diagnostic and error contracts for lexer stages.
+//!
+//! Phase 2 keeps diagnostics byte-span based. Line/column tracking now lives in
+//! the cursor and will be wired into diagnostics in a later phase.
 
 use crate::lexer::span::Span;
 

@@ -17,6 +17,14 @@ pub use bytecode::{
 };
 pub use encode::encode_module;
 pub use error::{IrError, IrErrorKind};
+pub use hir::{
+    HirAndOr, HirAndOrConnector, HirAssignment, HirCaseClause, HirCaseItem, HirCaseTerminator,
+    HirCommand, HirCompleteCommand, HirCompoundCommand, HirCompoundCommandNode, HirForClause,
+    HirFunctionDefinition, HirIfClause, HirList, HirListTerminator, HirModule, HirOrigin,
+    HirOriginKind, HirPipeline, HirProgram, HirRedirect, HirRedirectOperator, HirSimpleCommand,
+    HirUntilClause, HirWhileClause, HirWord,
+};
+pub use hir_builder::HirBuilder;
 pub use ids::{
     ArithProgramId, CodeObjectId, ConstId, LabelId, LocalId, RedirectProgramId, StringId, SymbolId,
     WordProgramId,

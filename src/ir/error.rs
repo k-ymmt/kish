@@ -84,4 +84,32 @@ impl IrError {
             Some(detail.into()),
         )
     }
+
+    /// Creates an `InvalidRedirectShape` error.
+    pub fn invalid_redirect_shape(
+        span: Option<Span>,
+        message: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            IrErrorKind::InvalidRedirectShape,
+            span,
+            message,
+            Some(detail.into()),
+        )
+    }
+
+    /// Creates an `InvalidAssignmentShape` error.
+    pub fn invalid_assignment_shape(
+        span: Option<Span>,
+        message: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            IrErrorKind::InvalidAssignmentShape,
+            span,
+            message,
+            Some(detail.into()),
+        )
+    }
 }

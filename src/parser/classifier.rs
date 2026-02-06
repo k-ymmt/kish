@@ -118,7 +118,7 @@ pub struct ClassificationOptions {
 }
 
 /// Classified token kind produced by parser context rules.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassifiedTokenKind {
     /// Ordinary word.
     Word,
@@ -169,6 +169,19 @@ impl Classifier {
             kind,
             token: token.clone(),
         }
+    }
+
+    /// Classifies and returns only the contextual token kind.
+    ///
+    /// This is a parser hot path that avoids cloning token payloads when only
+    /// reclassification output is needed.
+    pub fn classify_kind_only(
+        &self,
+        token: &Token,
+        context: ClassificationContext,
+        options: ClassificationOptions,
+    ) -> ClassifiedTokenKind {
+        self.classify_kind(token, context, options)
     }
 
     fn classify_kind(

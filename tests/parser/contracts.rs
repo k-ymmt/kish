@@ -40,4 +40,7 @@ fn parse_step_and_error_kinds_are_public_contracts() {
 
     let kind = ParseErrorKind::GrammarNotImplemented;
     assert_eq!(kind, ParseErrorKind::GrammarNotImplemented);
+
+    let nesting_kind = ParseErrorKind::MaxNestingExceeded;
+    assert_eq!(nesting_kind, ParseErrorKind::MaxNestingExceeded);
 }

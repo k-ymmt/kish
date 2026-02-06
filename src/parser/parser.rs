@@ -60,6 +60,7 @@ pub struct Parser<'a> {
     diagnostics: Vec<ParseDiagnostic>,
     arena: AstArena,
     function_body_rule9_depth: usize,
+    nesting_depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -73,6 +74,7 @@ impl<'a> Parser<'a> {
             diagnostics: Vec::new(),
             arena: AstArena::new(options.max_ast_nodes),
             function_body_rule9_depth: 0,
+            nesting_depth: 0,
         }
     }
 
@@ -115,7 +117,7 @@ impl<'a> Parser<'a> {
     fn parse_complete_command_public(&mut self) -> ParseResult<ParseStep> {
         self.parse_linebreak()?;
 
-        let Some(_) = self.peek_token(0)? else {
+        let Some(_) = self.peek_token_ref(0)? else {
             return Ok(ParseStep::EndOfInput);
         };
 
@@ -133,9 +135,9 @@ impl<'a> Parser<'a> {
 
         self.parse_linebreak()?;
 
-        if let Some(token) = self.peek_token(0)? {
+        if let Some(token) = self.peek_token_ref(0)? {
             return Err(ParseFailure::Error(ParseError::unexpected_token(
-                &token,
+                token,
                 ["EOF"],
             )));
         }
@@ -376,30 +378,32 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_compound_payload_nonterminal(&mut self) -> ParseResult<(CompoundCommandAst, Span)> {
-        let head = self.peek_token(0)?.ok_or_else(|| {
-            ParseFailure::Error(ParseError::unexpected_end_of_input(["compound_command"]))
-        })?;
+        self.with_nesting_guard(|parser| {
+            let head = parser.peek_token(0)?.ok_or_else(|| {
+                ParseFailure::Error(ParseError::unexpected_end_of_input(["compound_command"]))
+            })?;
 
-        match head.kind {
-            TokenKind::Operator(OperatorKind::LeftParen) => self.parse_subshell_nonterminal(),
-            TokenKind::Operator(_) | TokenKind::Newline => Err(ParseFailure::Error(
-                ParseError::unexpected_token(&head, ["compound_command"]),
-            )),
-            TokenKind::Token if is_plain_brace_open_token(&head) => {
-                self.parse_brace_group_nonterminal()
+            match head.kind {
+                TokenKind::Operator(OperatorKind::LeftParen) => parser.parse_subshell_nonterminal(),
+                TokenKind::Operator(_) | TokenKind::Newline => Err(ParseFailure::Error(
+                    ParseError::unexpected_token(&head, ["compound_command"]),
+                )),
+                TokenKind::Token if is_plain_brace_open_token(&head) => {
+                    parser.parse_brace_group_nonterminal()
+                }
+                TokenKind::Token => match parser.peek_reserved_word(ReservedWordPolicy::Any)? {
+                    Some(ReservedWord::If) => parser.parse_if_clause_nonterminal(),
+                    Some(ReservedWord::For) => parser.parse_for_clause_nonterminal(),
+                    Some(ReservedWord::While) => parser.parse_while_clause_nonterminal(),
+                    Some(ReservedWord::Until) => parser.parse_until_clause_nonterminal(),
+                    Some(ReservedWord::Case) => parser.parse_case_clause_nonterminal(),
+                    _ => Err(ParseFailure::Error(ParseError::unexpected_token(
+                        &head,
+                        ["compound_command"],
+                    ))),
+                },
             }
-            TokenKind::Token => match self.peek_reserved_word(ReservedWordPolicy::Any)? {
-                Some(ReservedWord::If) => self.parse_if_clause_nonterminal(),
-                Some(ReservedWord::For) => self.parse_for_clause_nonterminal(),
-                Some(ReservedWord::While) => self.parse_while_clause_nonterminal(),
-                Some(ReservedWord::Until) => self.parse_until_clause_nonterminal(),
-                Some(ReservedWord::Case) => self.parse_case_clause_nonterminal(),
-                _ => Err(ParseFailure::Error(ParseError::unexpected_token(
-                    &head,
-                    ["compound_command"],
-                ))),
-            },
-        }
+        })
     }
 
     fn parse_subshell_nonterminal(&mut self) -> ParseResult<(CompoundCommandAst, Span)> {
@@ -1130,10 +1134,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_linebreak(&mut self) -> ParseResult<()> {
-        while let Some(token) = self.peek_token(0)? {
-            if token.kind != TokenKind::Newline {
-                break;
-            }
+        while self.peek_is_newline()? {
             let _newline = self.next_token()?;
         }
         Ok(())
@@ -1142,10 +1143,7 @@ impl<'a> Parser<'a> {
     fn parse_newline_list(&mut self) -> ParseResult<usize> {
         let mut count = 0;
 
-        while let Some(token) = self.peek_token(0)? {
-            if token.kind != TokenKind::Newline {
-                break;
-            }
+        while self.peek_is_newline()? {
             let _newline = self.next_token()?;
             count += 1;
         }
@@ -1191,14 +1189,9 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_separator_op_token(&mut self) -> ParseResult<Option<Token>> {
-        let Some(token) = self.peek_token(0)? else {
+        let Some(kind) = self.peek_operator_kind(0)? else {
             return Ok(None);
         };
-
-        let TokenKind::Operator(kind) = token.kind else {
-            return Ok(None);
-        };
-
         if !is_list_separator_operator(kind) {
             return Ok(None);
         }
@@ -1207,15 +1200,15 @@ impl<'a> Parser<'a> {
     }
 
     fn can_start_complete_command(&mut self) -> ParseResult<bool> {
-        match self.peek_token(0)? {
-            Some(token) => Ok(token_can_start_pipeline(&token)),
+        match self.peek_token_ref(0)? {
+            Some(token) => Ok(token_can_start_pipeline(token)),
             None => Ok(false),
         }
     }
 
     fn can_start_pipeline_at(&mut self, offset: usize) -> ParseResult<bool> {
-        match self.peek_token(offset)? {
-            Some(token) => Ok(token_can_start_pipeline(&token)),
+        match self.peek_token_ref(offset)? {
+            Some(token) => Ok(token_can_start_pipeline(token)),
             None => Ok(false),
         }
     }
@@ -1225,21 +1218,21 @@ impl<'a> Parser<'a> {
         offset: usize,
         mut context: ClassificationContext,
     ) -> ParseResult<ClassifiedTokenKind> {
-        let token = self.peek_token(offset)?.ok_or_else(|| {
-            ParseFailure::Error(ParseError::unexpected_end_of_input(["command token"]))
-        })?;
+        let classifier = self.classifier;
+        let allow_io_location = self.options.allow_io_location;
         if context.delimiter_context.is_none() {
             context.delimiter_context = self.peek_delimiter_context(offset.saturating_add(1))?;
         }
-        let classified = self.classifier.classify(
-            &token,
+        let token = self.peek_token_ref(offset)?.ok_or_else(|| {
+            ParseFailure::Error(ParseError::unexpected_end_of_input(["command token"]))
+        })?;
+        let classified = classifier.classify_kind_only(
+            token,
             context,
-            ClassificationOptions {
-                allow_io_location: self.options.allow_io_location,
-            },
+            ClassificationOptions { allow_io_location },
         );
 
-        Ok(classified.kind)
+        Ok(classified)
     }
 
     fn can_start_io_redirect_at(&mut self, offset: usize) -> ParseResult<bool> {
@@ -1272,31 +1265,57 @@ impl<'a> Parser<'a> {
     }
 
     fn peek_delimiter_context(&mut self, offset: usize) -> ParseResult<Option<DelimiterContext>> {
-        let next = self.peek_token(offset)?;
-        Ok(next.as_ref().and_then(delimiter_context_from_token))
+        let next = self.peek_token_ref(offset)?;
+        Ok(next.and_then(delimiter_context_from_token))
+    }
+
+    fn peek_token_ref(&mut self, n: usize) -> ParseResult<Option<&Token>> {
+        let interactive = self.options.interactive;
+        match self.token_stream.peek(n) {
+            Ok(token) => Ok(token),
+            Err(error) => Err(Self::stream_error_to_failure_with_interactive(
+                interactive,
+                error,
+            )),
+        }
     }
 
     fn peek_token(&mut self, n: usize) -> ParseResult<Option<Token>> {
-        self.token_stream
-            .peek(n)
-            .map(|token| token.cloned())
-            .map_err(|error| self.stream_error_to_failure(error))
+        let interactive = self.options.interactive;
+        match self.token_stream.peek(n) {
+            Ok(token) => Ok(token.cloned()),
+            Err(error) => Err(Self::stream_error_to_failure_with_interactive(
+                interactive,
+                error,
+            )),
+        }
     }
 
     fn next_token(&mut self) -> ParseResult<Option<Token>> {
-        self.token_stream
-            .next()
-            .map_err(|error| self.stream_error_to_failure(error))
+        let interactive = self.options.interactive;
+        match self.token_stream.next() {
+            Ok(token) => Ok(token),
+            Err(error) => Err(Self::stream_error_to_failure_with_interactive(
+                interactive,
+                error,
+            )),
+        }
     }
 
     fn peek_operator_kind(&mut self, offset: usize) -> ParseResult<Option<OperatorKind>> {
-        match self.peek_token(offset)? {
+        match self.peek_token_ref(offset)? {
             Some(token) => match token.kind {
                 TokenKind::Operator(kind) => Ok(Some(kind)),
                 _ => Ok(None),
             },
             None => Ok(None),
         }
+    }
+
+    fn peek_is_newline(&mut self) -> ParseResult<bool> {
+        Ok(self
+            .peek_token_ref(0)?
+            .is_some_and(|token| token.kind == TokenKind::Newline))
     }
 
     fn consume_operator_kind(&mut self, kind: OperatorKind) -> ParseResult<Token> {
@@ -1341,6 +1360,24 @@ impl<'a> Parser<'a> {
         self.function_body_rule9_depth += 1;
         let result = parse(self);
         self.function_body_rule9_depth -= 1;
+        result
+    }
+
+    fn with_nesting_guard<T>(
+        &mut self,
+        parse: impl FnOnce(&mut Self) -> ParseResult<T>,
+    ) -> ParseResult<T> {
+        let attempted = self.nesting_depth.saturating_add(1);
+        if attempted > self.options.max_nesting {
+            return Err(ParseFailure::Error(ParseError::max_nesting_exceeded(
+                self.options.max_nesting,
+                attempted,
+            )));
+        }
+
+        self.nesting_depth = attempted;
+        let result = parse(self);
+        self.nesting_depth -= 1;
         result
     }
 
@@ -1606,10 +1643,13 @@ impl<'a> Parser<'a> {
             .map_err(ParseFailure::Error)
     }
 
-    fn stream_error_to_failure(&self, error: TokenStreamError) -> ParseFailure {
+    fn stream_error_to_failure_with_interactive(
+        interactive: bool,
+        error: TokenStreamError,
+    ) -> ParseFailure {
         match error {
             TokenStreamError::NeedMoreInput(reason) => {
-                if self.options.interactive {
+                if interactive {
                     ParseFailure::NeedMoreInput(reason)
                 } else {
                     ParseFailure::Error(ParseError::from_need_more_reason(reason))
@@ -1743,10 +1783,12 @@ fn delimiter_context_from_token(token: &Token) -> Option<DelimiterContext> {
     }
 }
 
+#[inline]
 fn is_list_separator_operator(kind: OperatorKind) -> bool {
     matches!(kind, OperatorKind::Semicolon | OperatorKind::Ampersand)
 }
 
+#[inline]
 fn is_command_delimiter_operator(kind: OperatorKind) -> bool {
     matches!(
         kind,
@@ -1761,6 +1803,7 @@ fn is_command_delimiter_operator(kind: OperatorKind) -> bool {
     )
 }
 
+#[inline]
 fn is_redirect_operator(kind: OperatorKind) -> bool {
     matches!(
         kind,
@@ -1794,10 +1837,12 @@ fn is_unimplemented_reserved(word: ReservedWord) -> bool {
     )
 }
 
+#[inline]
 fn is_bang_token(token: &Token) -> bool {
     token.kind == TokenKind::Token && token.is_plain() && token.lexeme == "!"
 }
 
+#[inline]
 fn token_can_start_pipeline(token: &Token) -> bool {
     if is_bang_token(token) {
         return true;

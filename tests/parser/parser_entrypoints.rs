@@ -222,7 +222,10 @@ fn boundary_keeps_second_command_after_function_definition() {
         .parse_complete_command()
         .expect("following command should parse");
 
-    assert!(matches!(first_command(&first), CommandAst::FunctionDefinition(_)));
+    assert!(matches!(
+        first_command(&first),
+        CommandAst::FunctionDefinition(_)
+    ));
     let ParseStep::Complete(second_complete) = second else {
         panic!("expected second step to be complete");
     };
@@ -315,7 +318,9 @@ fn parse_complete_command_sequence_matches_parse_program_order() {
     }
 
     let mut whole = parser_for(input, ParseOptions::default());
-    let program = whole.parse_program().expect("program parsing should succeed");
+    let program = whole
+        .parse_program()
+        .expect("program parsing should succeed");
     let program_words: Vec<String> = program
         .complete_commands
         .iter()
@@ -324,4 +329,117 @@ fn parse_complete_command_sequence_matches_parse_program_order() {
 
     assert_eq!(incremental_words, program_words);
     assert_eq!(incremental_words, vec!["alpha", "beta", "gamma"]);
+}
+
+fn nested_subshell_input(depth: usize) -> String {
+    let mut input = String::new();
+    for _ in 0..depth {
+        input.push('(');
+    }
+    input.push_str("echo");
+    for _ in 0..depth {
+        input.push(')');
+    }
+    input.push('\n');
+    input
+}
+
+#[test]
+fn max_nesting_guard_rejects_pathological_depth() {
+    let input = nested_subshell_input(6);
+    let mut parser = parser_for(
+        &input,
+        ParseOptions {
+            max_nesting: 3,
+            ..Default::default()
+        },
+    );
+
+    let error = parser
+        .parse_complete_command()
+        .expect_err("depth beyond max_nesting should fail fast");
+    assert_eq!(error.kind, ParseErrorKind::MaxNestingExceeded);
+    assert_eq!(error.expected, vec!["max_nesting <= 3".to_string()]);
+    assert_eq!(error.found, Some("nesting depth 4".to_string()));
+}
+
+#[test]
+fn max_nesting_guard_allows_depth_within_limit() {
+    let input = nested_subshell_input(4);
+    let mut parser = parser_for(
+        &input,
+        ParseOptions {
+            max_nesting: 4,
+            ..Default::default()
+        },
+    );
+
+    let step = parser
+        .parse_complete_command()
+        .expect("depth at max_nesting should parse");
+    assert!(matches!(step, ParseStep::Complete(_)));
+}
+
+#[test]
+fn stress_long_simple_command_stream_is_stable() {
+    let command_count = 1500usize;
+    let mut input = String::new();
+    for i in 0..command_count {
+        input.push_str("echo ");
+        input.push_str(&i.to_string());
+        input.push('\n');
+    }
+
+    let mut parser = parser_for(&input, ParseOptions::default());
+    let mut complete_count = 0usize;
+    loop {
+        match parser
+            .parse_complete_command()
+            .expect("long simple-command stream should parse")
+        {
+            ParseStep::Complete(_) => complete_count += 1,
+            ParseStep::EndOfInput => break,
+            ParseStep::NeedMoreInput(reason) => {
+                panic!("did not expect need-more-input for closed stream: {reason:?}")
+            }
+        }
+    }
+
+    assert_eq!(complete_count, command_count);
+}
+
+#[test]
+fn stress_deep_nesting_with_default_limit_is_stable() {
+    let input = nested_subshell_input(64);
+    let mut parser = parser_for(&input, ParseOptions::default());
+    let step = parser
+        .parse_complete_command()
+        .expect("deep nesting under default max_nesting should parse");
+    assert!(matches!(step, ParseStep::Complete(_)));
+}
+
+#[test]
+fn stress_mixed_pipeline_and_list_sequences_is_stable() {
+    let command_count = 400usize;
+    let mut input = String::new();
+    for i in 0..command_count {
+        input.push_str(&format!("a{i}|b{i} && c{i} || d{i}; e{i} &\n"));
+    }
+
+    let mut parser = parser_for(&input, ParseOptions::default());
+    let mut complete_count = 0usize;
+    loop {
+        match parser
+            .parse_complete_command()
+            .expect("mixed pipeline/list stream should parse")
+        {
+            ParseStep::Complete(_) => complete_count += 1,
+            ParseStep::EndOfInput => break,
+            ParseStep::NeedMoreInput(reason) => {
+                panic!("did not expect need-more-input for closed stream: {reason:?}")
+            }
+        }
+    }
+
+    assert_eq!(complete_count, command_count);
 }

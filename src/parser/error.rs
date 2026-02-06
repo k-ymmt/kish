@@ -20,6 +20,8 @@ pub enum ParseErrorKind {
     GrammarNotImplemented,
     /// AST node allocation exceeded configured parser limit.
     AstNodeLimitExceeded,
+    /// Syntactic recursion depth exceeded configured parser limit.
+    MaxNestingExceeded,
 }
 
 /// Parser error payload.
@@ -126,6 +128,16 @@ impl ParseError {
             None,
             vec![format!("max_ast_nodes <= {limit}")],
             Some(format!("node allocation attempt {attempted}")),
+        )
+    }
+
+    /// Creates a max nesting depth exceeded error.
+    pub fn max_nesting_exceeded(limit: usize, attempted: usize) -> Self {
+        Self::new(
+            ParseErrorKind::MaxNestingExceeded,
+            None,
+            vec![format!("max_nesting <= {limit}")],
+            Some(format!("nesting depth {attempted}")),
         )
     }
 

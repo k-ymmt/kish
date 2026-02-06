@@ -434,7 +434,7 @@ fn for_loop_interns_variable_symbol() {
 fn case_basic_structure() {
     let module = lower_command("case x in a) echo a;; esac\n");
     let instrs = top_instructions(&module);
-    assert!(instrs.contains(&Instruction::CaseSetSubject));
+    assert!(instrs.iter().any(|i| matches!(i, Instruction::CaseSetSubject(_))));
     assert!(instrs.iter().any(|i| matches!(i, Instruction::CaseTestPattern(_))));
     assert!(instrs.contains(&Instruction::CaseClear));
 }
@@ -459,7 +459,7 @@ fn case_fallthrough_jumps_to_next_body() {
     // With fallthrough, item[0]'s terminator jumps to item[1]'s body label,
     // skipping item[1]'s pattern matching.
     // We verify the structure has the correct pattern.
-    assert!(instrs.contains(&Instruction::CaseSetSubject));
+    assert!(instrs.iter().any(|i| matches!(i, Instruction::CaseSetSubject(_))));
     assert!(instrs.contains(&Instruction::CaseClear));
 }
 

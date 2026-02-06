@@ -21,6 +21,8 @@ pub enum IrErrorKind {
     InvalidRedirectShape,
     /// Assignment form is malformed or inconsistent.
     InvalidAssignmentShape,
+    /// Word form is malformed or inconsistent.
+    InvalidWordShape,
 }
 
 /// IR error payload.
@@ -107,6 +109,20 @@ impl IrError {
     ) -> Self {
         Self::new(
             IrErrorKind::InvalidAssignmentShape,
+            span,
+            message,
+            Some(detail.into()),
+        )
+    }
+
+    /// Creates an `InvalidWordShape` error.
+    pub fn invalid_word_shape(
+        span: Option<Span>,
+        message: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            IrErrorKind::InvalidWordShape,
             span,
             message,
             Some(detail.into()),

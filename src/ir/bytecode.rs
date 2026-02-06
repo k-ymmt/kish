@@ -100,8 +100,8 @@ pub enum Instruction {
     ForAddWord(WordProgramId),
     /// Advances for-loop iterator. Pushes 1 (value available, var set) or 0 (done).
     ForNext,
-    /// Pops top-of-stack and stores as case subject.
-    CaseSetSubject,
+    /// Sets the case subject from a word expansion program.
+    CaseSetSubject(WordProgramId),
     /// Tests pattern against stored case subject. Pushes 1 (match) or 0 (no match).
     CaseTestPattern(WordProgramId),
     /// Clears stored case subject.
@@ -113,6 +113,8 @@ pub enum Instruction {
 pub enum WordProgramOp {
     /// Appends literal bytes from string pool.
     PushLiteral(StringId),
+    /// Expands tilde prefix (~, ~user).
+    ExpandTilde(StringId),
     /// Expands one shell parameter.
     ExpandParameter(SymbolId),
     /// Expands one command substitution.

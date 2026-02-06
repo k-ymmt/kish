@@ -10,3 +10,4 @@ mod hir_mapping_exhaustive;
 mod lower_from_parser;
 mod pooling_interning;
 mod vm_ir_contracts;
+mod word_program_lowering;

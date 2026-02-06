@@ -11,8 +11,11 @@ use crate::ir::hir::{
     HirFunctionDefinition, HirIfClause, HirList, HirListTerminator, HirPipeline, HirProgram,
     HirSimpleCommand, HirUntilClause, HirWhileClause, HirWord,
 };
-use crate::ir::ids::{CodeObjectId, RedirectProgramId, WordProgramId};
-use crate::ir::program::{CodeObjectBuilder, IrModuleBuilder, RedirectProgram, WordProgram};
+use crate::ir::ids::{CodeObjectId, RedirectProgramId};
+use crate::ir::lower::word_program::{
+    lower_assignment_value_to_program, lower_word_to_program, WordContext,
+};
+use crate::ir::program::{CodeObjectBuilder, IrModuleBuilder, RedirectProgram};
 
 // ---------------------------------------------------------------------------
 // EmitContext
@@ -30,7 +33,7 @@ impl<'a> EmitContext<'a> {
     }
 
     /// Returns a mutable reference to the module builder.
-    fn module(&mut self) -> &mut IrModuleBuilder {
+    pub(crate) fn module(&mut self) -> &mut IrModuleBuilder {
         self.module
     }
 }
@@ -405,8 +408,8 @@ fn emit_for(
     })?;
 
     // Add word programs for each iteration word.
-    for _word in &clause.words {
-        let wp_id = stub_word_program(ctx)?;
+    for word in &clause.words {
+        let wp_id = lower_word_to_program(ctx, word, WordContext::ForWord)?;
         builder.emit(Instruction::ForAddWord(wp_id))?;
     }
 
@@ -439,9 +442,9 @@ fn emit_case(
 ) -> Result<(), IrError> {
     let case_end = builder.new_label();
 
-    // Stub case subject (Phase 7 will expand the word).
-    builder.emit(Instruction::PushInt(0))?;
-    builder.emit(Instruction::CaseSetSubject)?;
+    // Expand case subject word.
+    let subject_wp = lower_word_to_program(ctx, &clause.word, WordContext::CaseSubject)?;
+    builder.emit(Instruction::CaseSetSubject(subject_wp))?;
 
     // Default exit status.
     builder.emit(Instruction::PushInt(0))?;
@@ -453,8 +456,8 @@ fn emit_case(
 
     for (i, item) in clause.items.iter().enumerate() {
         // Pattern matching: test each pattern.
-        for _pattern in &item.patterns {
-            let wp_id = stub_word_program(ctx)?;
+        for pattern in &item.patterns {
+            let wp_id = lower_word_to_program(ctx, pattern, WordContext::CasePattern)?;
             builder.emit(Instruction::CaseTestPattern(wp_id))?;
             builder.emit_jmp_if_non_zero(body_labels[i])?;
         }
@@ -592,13 +595,13 @@ fn emit_simple_command(
     // Emit assignments.
     for assign in &simple.assignments {
         let sym = ctx.module().intern_symbol(&assign.name)?;
-        let wp = stub_word_program(ctx)?;
+        let wp = lower_assignment_value_to_program(ctx, assign)?;
         builder.emit(Instruction::AddAssign(sym, wp))?;
     }
 
     // Emit word arguments.
-    for _word in &simple.words {
-        let wp = stub_word_program(ctx)?;
+    for word in &simple.words {
+        let wp = lower_word_to_program(ctx, word, WordContext::CommandArgument)?;
         builder.emit(Instruction::AddArg(wp))?;
     }
 
@@ -655,15 +658,6 @@ fn is_posix_special_builtin(name: &str) -> bool {
             | "trap"
             | "unset"
     )
-}
-
-// ---------------------------------------------------------------------------
-// Helper: stub word program
-// ---------------------------------------------------------------------------
-
-/// Creates a stub (empty) word program as a Phase 7 placeholder.
-fn stub_word_program(ctx: &mut EmitContext<'_>) -> Result<WordProgramId, IrError> {
-    ctx.module().add_word_program(WordProgram::default())
 }
 
 // ---------------------------------------------------------------------------

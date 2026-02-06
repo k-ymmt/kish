@@ -4,6 +4,8 @@
 //! public shapes for later grammar and lowering phases.
 
 use crate::lexer::{OperatorKind, Span, Token};
+use crate::parser::arena::AstArena;
+use crate::parser::error::ParseError;
 
 /// Root parser output for full-program parsing.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -202,4 +204,150 @@ pub struct CaseClauseAst {
     pub word: WordAst,
     /// Source span for this `case` clause.
     pub span: Span,
+}
+
+/// Lightweight AST builder backed by [`AstArena`] accounting.
+pub struct AstBuilder<'a> {
+    arena: &'a mut AstArena,
+}
+
+impl<'a> AstBuilder<'a> {
+    /// Creates an AST builder from an arena allocator.
+    pub fn new(arena: &'a mut AstArena) -> Self {
+        Self { arena }
+    }
+
+    /// Builds a word node from a lexer token.
+    pub fn word_from_token(&mut self, token: Token) -> Result<WordAst, ParseError> {
+        self.reserve_node()?;
+        Ok(WordAst {
+            span: token.span,
+            token,
+        })
+    }
+
+    /// Builds an assignment node from a lexer token and split payload.
+    pub fn assignment_word_from_parts(
+        &mut self,
+        token: Token,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<AssignmentWordAst, ParseError> {
+        self.reserve_node()?;
+        Ok(AssignmentWordAst {
+            span: token.span,
+            token,
+            name: name.into(),
+            value: value.into(),
+        })
+    }
+
+    /// Builds a redirect node preserving left-to-right encounter order.
+    pub fn redirect(
+        &mut self,
+        fd_or_location: Option<Token>,
+        operator: OperatorKind,
+        target: WordAst,
+        span: Span,
+    ) -> Result<RedirectAst, ParseError> {
+        self.reserve_node()?;
+        Ok(RedirectAst {
+            fd_or_location,
+            operator,
+            target,
+            span,
+        })
+    }
+
+    /// Builds a simple-command node.
+    pub fn simple_command(
+        &mut self,
+        assignments: Vec<AssignmentWordAst>,
+        words: Vec<WordAst>,
+        redirects: Vec<RedirectAst>,
+        span: Option<Span>,
+    ) -> Result<SimpleCommandAst, ParseError> {
+        self.reserve_node()?;
+        Ok(SimpleCommandAst {
+            assignments,
+            words,
+            redirects,
+            span,
+        })
+    }
+
+    /// Wraps a simple command into a command node.
+    pub fn command_simple(&mut self, command: SimpleCommandAst) -> Result<CommandAst, ParseError> {
+        self.reserve_node()?;
+        Ok(CommandAst::Simple(command))
+    }
+
+    /// Builds a pipeline node.
+    pub fn pipeline(
+        &mut self,
+        negated: bool,
+        commands: Vec<CommandAst>,
+        span: Span,
+    ) -> Result<PipelineAst, ParseError> {
+        self.reserve_node()?;
+        Ok(PipelineAst {
+            negated,
+            commands,
+            span,
+        })
+    }
+
+    /// Builds an and-or node.
+    pub fn and_or(
+        &mut self,
+        head: PipelineAst,
+        tail: Vec<(OperatorKind, PipelineAst)>,
+        span: Span,
+    ) -> Result<AndOrAst, ParseError> {
+        self.reserve_node()?;
+        Ok(AndOrAst { head, tail, span })
+    }
+
+    /// Builds a list node.
+    pub fn list(&mut self, and_ors: Vec<AndOrAst>, span: Span) -> Result<ListAst, ParseError> {
+        self.reserve_node()?;
+        Ok(ListAst { and_ors, span })
+    }
+
+    /// Builds a complete-command node.
+    pub fn complete_command(
+        &mut self,
+        list: ListAst,
+        separator_op: Option<OperatorKind>,
+        span: Span,
+    ) -> Result<CompleteCommandAst, ParseError> {
+        self.reserve_node()?;
+        Ok(CompleteCommandAst {
+            list,
+            separator_op,
+            span,
+        })
+    }
+
+    /// Builds a program node.
+    pub fn program(
+        &mut self,
+        complete_commands: Vec<CompleteCommandAst>,
+        span: Option<Span>,
+    ) -> Result<ProgramAst, ParseError> {
+        self.reserve_node()?;
+        Ok(ProgramAst {
+            complete_commands,
+            span,
+        })
+    }
+
+    /// Returns current number of allocated AST nodes.
+    pub fn allocated_nodes(&self) -> usize {
+        self.arena.allocated_nodes()
+    }
+
+    fn reserve_node(&mut self) -> Result<(), ParseError> {
+        self.arena.allocate().map(|_| ()).map_err(ParseError::from)
+    }
 }

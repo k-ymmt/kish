@@ -2,6 +2,7 @@
 
 use crate::lexer::{FatalLexError, Span, Token};
 
+use crate::parser::arena::ArenaError;
 use crate::parser::recovery::NeedMoreInputReason;
 
 /// Stable parser error categories.
@@ -17,6 +18,8 @@ pub enum ParseErrorKind {
     LexerError,
     /// Grammar reduction is intentionally not implemented in this phase.
     GrammarNotImplemented,
+    /// AST node allocation exceeded configured parser limit.
+    AstNodeLimitExceeded,
 }
 
 /// Parser error payload.
@@ -116,6 +119,16 @@ impl ParseError {
         )
     }
 
+    /// Creates an AST node limit exceeded error.
+    pub fn ast_node_limit_exceeded(limit: usize, attempted: usize) -> Self {
+        Self::new(
+            ParseErrorKind::AstNodeLimitExceeded,
+            None,
+            vec![format!("max_ast_nodes <= {limit}")],
+            Some(format!("node allocation attempt {attempted}")),
+        )
+    }
+
     /// Converts a continuation reason into a non-interactive parse error.
     pub fn from_need_more_reason(reason: NeedMoreInputReason) -> Self {
         Self::new(
@@ -124,5 +137,15 @@ impl ParseError {
             vec!["additional input to complete command".to_string()],
             Some(format!("{reason:?}")),
         )
+    }
+}
+
+impl From<ArenaError> for ParseError {
+    fn from(value: ArenaError) -> Self {
+        match value {
+            ArenaError::NodeLimitExceeded { limit, attempted } => {
+                ParseError::ast_node_limit_exceeded(limit, attempted)
+            }
+        }
     }
 }

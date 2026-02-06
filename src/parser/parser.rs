@@ -2,7 +2,7 @@
 
 use crate::lexer::{DelimiterContext, OperatorKind, SourceId, Token, TokenKind};
 use crate::parser::arena::AstArena;
-use crate::parser::ast::{CompleteCommandAst, ProgramAst};
+use crate::parser::ast::{AstBuilder, CompleteCommandAst, ProgramAst};
 use crate::parser::classifier::{
     ClassificationContext, ClassificationOptions, Classifier, NameContext, ReservedWordPolicy,
 };
@@ -52,7 +52,6 @@ pub struct Parser<'a> {
     token_stream: TokenStream<'a>,
     classifier: Classifier,
     diagnostics: Vec<ParseDiagnostic>,
-    #[allow(dead_code)]
     arena: AstArena,
 }
 
@@ -107,6 +106,9 @@ impl<'a> Parser<'a> {
             },
         );
 
+        let mut builder = AstBuilder::new(&mut self.arena);
+        let _head_word = builder.word_from_token(head.clone())?;
+
         Err(ParseError::grammar_not_implemented(
             Some(head.span),
             Some(head.lexeme),
@@ -115,21 +117,20 @@ impl<'a> Parser<'a> {
 
     /// Parses a whole program.
     pub fn parse_program(&mut self) -> Result<ProgramAst, ParseError> {
-        let mut program = ProgramAst::default();
+        let mut complete_commands = Vec::new();
 
         loop {
             match self.parse_complete_command()? {
                 ParseStep::Complete(command) => {
-                    program.complete_commands.push(command);
+                    complete_commands.push(command);
                 }
                 ParseStep::NeedMoreInput(reason) => {
                     return Err(ParseError::from_need_more_reason(reason));
                 }
                 ParseStep::EndOfInput => {
-                    if let Some(first) = program.complete_commands.first() {
-                        program.span = Some(first.span);
-                    }
-                    return Ok(program);
+                    let span = complete_commands.first().map(|command| command.span);
+                    let mut builder = AstBuilder::new(&mut self.arena);
+                    return builder.program(complete_commands, span);
                 }
             }
         }

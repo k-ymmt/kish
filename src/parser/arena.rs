@@ -1,7 +1,7 @@
-//! Parser AST arena scaffolding.
+//! Parser AST arena contracts.
 //!
-//! Phase 0-2 exposes node accounting contracts only. Full arena-backed node
-//! allocation is implemented in later phases.
+//! Phase 3 provides deterministic node allocation accounting with explicit
+//! limit failures for parser-side AST builders.
 
 /// Opaque AST node identifier for arena allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -23,7 +23,7 @@ impl AstNodeId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArenaError {
     /// Allocation would exceed configured node limit.
-    NodeLimitExceeded { limit: usize },
+    NodeLimitExceeded { limit: usize, attempted: usize },
 }
 
 /// Lightweight node allocation counter.
@@ -47,6 +47,7 @@ impl AstArena {
         if self.allocated_nodes >= self.max_nodes {
             return Err(ArenaError::NodeLimitExceeded {
                 limit: self.max_nodes,
+                attempted: self.allocated_nodes.saturating_add(1),
             });
         }
 

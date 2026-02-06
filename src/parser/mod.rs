@@ -1,7 +1,7 @@
 //! POSIX-first parser scaffolding and contracts.
 //!
-//! Phase 0-2 provides parser-facing contracts, a lexer-backed token stream,
-//! and contextual token reclassification.
+//! Phase 0-3 provides parser-facing contracts, a lexer-backed token stream,
+//! contextual token reclassification, and AST arena/builder utilities.
 
 pub mod arena;
 pub mod ast;
@@ -13,9 +13,9 @@ pub mod token_stream;
 
 pub use arena::{ArenaError, AstArena, AstNodeId};
 pub use ast::{
-    AndOrAst, AssignmentWordAst, CaseClauseAst, CommandAst, CompleteCommandAst, CompoundCommandAst,
-    ForClauseAst, FunctionDefinitionAst, IfClauseAst, ListAst, PipelineAst, ProgramAst,
-    RedirectAst, SimpleCommandAst, UntilClauseAst, WhileClauseAst, WordAst,
+    AndOrAst, AssignmentWordAst, AstBuilder, CaseClauseAst, CommandAst, CompleteCommandAst,
+    CompoundCommandAst, ForClauseAst, FunctionDefinitionAst, IfClauseAst, ListAst, PipelineAst,
+    ProgramAst, RedirectAst, SimpleCommandAst, UntilClauseAst, WhileClauseAst, WordAst,
 };
 pub use classifier::{
     ClassificationContext, ClassificationOptions, ClassifiedToken, ClassifiedTokenKind, Classifier,

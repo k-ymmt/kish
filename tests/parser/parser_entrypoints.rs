@@ -54,12 +54,10 @@ fn parse_complete_command_returns_error_in_non_interactive_mode() {
 }
 
 #[test]
-fn grammar_stub_returns_not_implemented_when_tokens_exist() {
+fn parse_complete_command_returns_complete_for_simple_command() {
     let mut parser = parser_for("echo hi\n", ParseOptions::default());
-    let error = parser
+    let step = parser
         .parse_complete_command()
-        .expect_err("grammar phase is intentionally stubbed");
-
-    assert_eq!(error.kind, ParseErrorKind::GrammarNotImplemented);
-    assert_eq!(error.found.as_deref(), Some("echo"));
+        .expect("simple command should parse");
+    assert!(matches!(step, ParseStep::Complete(_)));
 }

@@ -1,8 +1,8 @@
 //! POSIX-oriented lexer module.
 //!
-//! Phase 4 adds quote-state token scanning:
+//! Phase 5 adds nested substitution scanning:
 //! longest-match operators, token-start comments, newline preservation, and
-//! quote metadata/diagnostics for `'...'`, `"..."`, `$'...'`, and backslashes.
+//! quote/substitution metadata and diagnostics for nested scanner constructs.
 
 pub mod diagnostics;
 pub mod span;
@@ -23,6 +23,10 @@ use crate::lexer::quote::{
 };
 use crate::lexer::scanner::{
     QuoteContext, consume_line_continuation_if_unquoted, is_comment_start,
+};
+use crate::lexer::substitution::{
+    fatal_error_from_scan_error, marker_from_scan, need_more_reason_from_scan_error,
+    try_scan_backquote, try_scan_dollar,
 };
 
 pub use diagnostics::{DiagnosticCode, FatalLexError, LexDiagnostic, RecoverableLexError};
@@ -48,12 +52,12 @@ pub enum LexerMode {
 
 /// A POSIX-first lexer with placeholder scanning behavior.
 ///
-/// Phase 4 behavior:
+/// Phase 5 behavior:
 /// - recognizes longest-match operators
 /// - preserves newline tokens
 /// - removes unquoted `\\\n` before token delimiting
 /// - applies token-start `#` comment skipping
-/// - preserves quote bytes and records quote metadata ranges per token
+/// - preserves quote bytes and records quote/substitution metadata per token
 pub struct Lexer<'a> {
     input: &'a str,
     mode: LexerMode,
@@ -79,13 +83,13 @@ impl<'a> Lexer<'a> {
 
     /// Scans and returns the next lexical step.
     ///
-    /// Phase 4 behavior:
+    /// Phase 5 behavior:
     /// - returns [`LexStep::EndOfInput`] once all input is consumed
     /// - emits one [`TokenKind::Newline`] per `\n`
     /// - emits [`TokenKind::Operator`] using longest-match rules
     /// - emits one [`TokenKind::Token`] for contiguous non-delimiter bytes
     /// - removes unquoted line continuations (`\\\n`) while scanning
-    /// - records quote/backslash markers for word tokens
+    /// - records quote/backslash and substitution markers for word tokens
     pub fn next_token(&mut self) -> Result<LexStep, FatalLexError> {
         self.skip_horizontal_whitespace();
 
@@ -131,6 +135,7 @@ impl<'a> Lexer<'a> {
         let mut quote_scanner = QuoteScanner::default();
         let mut lexeme_bytes = Vec::new();
         let mut quote_markers = Vec::new();
+        let mut substitution_markers = Vec::new();
 
         while !self.cursor.is_eof(self.input) {
             if quote_scanner.is_unquoted()
@@ -176,6 +181,13 @@ impl<'a> Lexer<'a> {
                         }
                     }
                     OpenQuoteKind::Double => {
+                        if self.try_consume_substitution(
+                            &mut lexeme_bytes,
+                            &mut substitution_markers,
+                            1,
+                        )? {
+                            continue;
+                        }
                         if byte == b'\\' {
                             self.consume_backslash_escape(&mut lexeme_bytes, &mut quote_markers);
                             continue;
@@ -220,6 +232,10 @@ impl<'a> Lexer<'a> {
                         }
                     }
                 }
+                continue;
+            }
+
+            if self.try_consume_substitution(&mut lexeme_bytes, &mut substitution_markers, 1)? {
                 continue;
             }
 
@@ -280,7 +296,7 @@ impl<'a> Lexer<'a> {
             lexeme,
             Span::new(self.source_id, start, end),
             quote_markers,
-            Vec::new(),
+            substitution_markers,
         )))
     }
 
@@ -311,7 +327,7 @@ impl<'a> Lexer<'a> {
     /// - otherwise tokenizes until newline or end of input and returns
     ///   [`BoundaryResult::Complete`]
     pub fn tokenize_complete_command_boundary(&mut self) -> Result<BoundaryResult, FatalLexError> {
-        if let Some(reason) = self.detect_incomplete_input_reason() {
+        if let Some(reason) = self.detect_incomplete_input_reason()? {
             return Ok(BoundaryResult::NeedMoreInput(NeedMoreInput::new(
                 self.cursor.offset(),
                 reason,
@@ -367,17 +383,73 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn detect_incomplete_input_reason(&self) -> Option<NeedMoreReason> {
+    fn detect_incomplete_input_reason(&self) -> Result<Option<NeedMoreReason>, FatalLexError> {
         let mut probe = self.cursor;
         let mut quote_context = QuoteContext::default();
         let mut previous_byte: Option<u8> = None;
         let mut saw_unquoted_trailing_backslash = false;
+        let mut probe_lexeme_bytes = Vec::new();
+        let mut probe_markers = Vec::new();
 
         while !probe.is_eof(self.input) {
             if consume_line_continuation_if_unquoted(&mut probe, self.input, &mut quote_context) {
                 saw_unquoted_trailing_backslash = false;
                 previous_byte = None;
                 continue;
+            }
+
+            if quote_context.can_start_substitution() {
+                let scan = match try_scan_dollar(
+                    &mut probe,
+                    self.input,
+                    &mut probe_lexeme_bytes,
+                    &mut probe_markers,
+                    1,
+                ) {
+                    Ok(scan) => scan,
+                    Err(error) => {
+                        if let Some(reason) = need_more_reason_from_scan_error(error) {
+                            return Ok(Some(reason));
+                        }
+                        return Err(fatal_error_from_scan_error(
+                            self.source_id,
+                            self.input,
+                            error,
+                        ));
+                    }
+                };
+                if let Some(scan) = scan {
+                    probe_markers.push(marker_from_scan(scan));
+                    saw_unquoted_trailing_backslash = false;
+                    previous_byte = None;
+                    continue;
+                }
+
+                let scan = match try_scan_backquote(
+                    &mut probe,
+                    self.input,
+                    &mut probe_lexeme_bytes,
+                    &mut probe_markers,
+                    1,
+                ) {
+                    Ok(scan) => scan,
+                    Err(error) => {
+                        if let Some(reason) = need_more_reason_from_scan_error(error) {
+                            return Ok(Some(reason));
+                        }
+                        return Err(fatal_error_from_scan_error(
+                            self.source_id,
+                            self.input,
+                            error,
+                        ));
+                    }
+                };
+                if let Some(scan) = scan {
+                    probe_markers.push(marker_from_scan(scan));
+                    saw_unquoted_trailing_backslash = false;
+                    previous_byte = None;
+                    continue;
+                }
             }
 
             let next_byte = probe.peek_next_byte(self.input);
@@ -392,14 +464,54 @@ impl<'a> Lexer<'a> {
         }
 
         if saw_unquoted_trailing_backslash {
-            return Some(NeedMoreReason::TrailingBackslash);
+            return Ok(Some(NeedMoreReason::TrailingBackslash));
         }
 
         if let Some(reason) = quote_context.incomplete_reason() {
-            return Some(reason);
+            return Ok(Some(reason));
         }
 
-        None
+        Ok(None)
+    }
+
+    fn try_consume_substitution(
+        &mut self,
+        lexeme_bytes: &mut Vec<u8>,
+        substitution_markers: &mut Vec<SubstitutionMarker>,
+        depth: u16,
+    ) -> Result<bool, FatalLexError> {
+        let Some(byte) = self.cursor.peek_byte(self.input) else {
+            return Ok(false);
+        };
+
+        let scan = if byte == b'$' {
+            try_scan_dollar(
+                &mut self.cursor,
+                self.input,
+                lexeme_bytes,
+                substitution_markers,
+                depth,
+            )
+            .map_err(|error| fatal_error_from_scan_error(self.source_id, self.input, error))?
+        } else if byte == b'`' {
+            try_scan_backquote(
+                &mut self.cursor,
+                self.input,
+                lexeme_bytes,
+                substitution_markers,
+                depth,
+            )
+            .map_err(|error| fatal_error_from_scan_error(self.source_id, self.input, error))?
+        } else {
+            None
+        };
+
+        if let Some(scan) = scan {
+            substitution_markers.push(marker_from_scan(scan));
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     fn consume_backslash_escape(

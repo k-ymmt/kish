@@ -367,6 +367,14 @@ pub enum NeedMoreReason {
     UnterminatedDoubleQuote,
     /// Unterminated dollar-single quote in remaining input.
     UnterminatedDollarSingleQuote,
+    /// Unterminated parameter expansion in remaining input.
+    UnterminatedParameterExpansion,
+    /// Unterminated command substitution in remaining input.
+    UnterminatedCommandSubstitution,
+    /// Unterminated backquoted command substitution in remaining input.
+    UnterminatedBackquotedCommandSubstitution,
+    /// Unterminated arithmetic expansion in remaining input.
+    UnterminatedArithmeticExpansion,
     /// Incomplete state propagated from recoverable lexer diagnostics.
     Recoverable(RecoverableLexError),
 }

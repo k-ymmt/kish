@@ -25,7 +25,12 @@ fn recoverable_and_fatal_errors_are_distinct_types() {
         }
         FatalLexError::UnterminatedSingleQuote(_)
         | FatalLexError::UnterminatedDoubleQuote(_)
-        | FatalLexError::UnterminatedDollarSingleQuote(_) => {
+        | FatalLexError::UnterminatedDollarSingleQuote(_)
+        | FatalLexError::UnterminatedParameterExpansion(_)
+        | FatalLexError::UnterminatedCommandSubstitution(_)
+        | FatalLexError::UnterminatedBackquotedCommandSubstitution(_)
+        | FatalLexError::UnterminatedArithmeticExpansion(_)
+        | FatalLexError::SubstitutionRecursionDepthExceeded(_) => {
             panic!("unexpected fatal variant")
         }
     }

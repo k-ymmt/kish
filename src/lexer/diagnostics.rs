@@ -16,6 +16,16 @@ pub enum DiagnosticCode {
     UnterminatedDoubleQuote,
     /// Unterminated dollar-single quote (`$'...'`) sequence.
     UnterminatedDollarSingleQuote,
+    /// Unterminated parameter expansion (`${...}`) sequence.
+    UnterminatedParameterExpansion,
+    /// Unterminated command substitution (`$(...)`) sequence.
+    UnterminatedCommandSubstitution,
+    /// Unterminated backquoted command substitution (`` `...` ``) sequence.
+    UnterminatedBackquotedCommandSubstitution,
+    /// Unterminated arithmetic expansion (`$((...))`) sequence.
+    UnterminatedArithmeticExpansion,
+    /// Substitution recursion depth exceeded the lexer cap.
+    SubstitutionRecursionDepthExceeded,
     /// Placeholder for internal invariant violations.
     InternalInvariant,
 }
@@ -60,4 +70,14 @@ pub enum FatalLexError {
     UnterminatedDoubleQuote(LexDiagnostic),
     /// Input ended before a dollar-single-quoted region closed.
     UnterminatedDollarSingleQuote(LexDiagnostic),
+    /// Input ended before a parameter expansion closed.
+    UnterminatedParameterExpansion(LexDiagnostic),
+    /// Input ended before a command substitution closed.
+    UnterminatedCommandSubstitution(LexDiagnostic),
+    /// Input ended before a backquoted command substitution closed.
+    UnterminatedBackquotedCommandSubstitution(LexDiagnostic),
+    /// Input ended before an arithmetic expansion closed.
+    UnterminatedArithmeticExpansion(LexDiagnostic),
+    /// Substitution recursion depth exceeded the lexer limit.
+    SubstitutionRecursionDepthExceeded(LexDiagnostic),
 }

@@ -13,5 +13,6 @@ mod next_token_behavior;
 mod operator_scanning;
 mod quote_scanning;
 mod source_span_types;
+mod substitution_scanning;
 mod token_model;
 mod word_boundaries;

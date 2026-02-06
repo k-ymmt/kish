@@ -28,6 +28,14 @@ impl QuoteContext {
         self.is_unquoted()
     }
 
+    /// Returns true when substitution starts (`$`, backquote) are recognized.
+    pub(crate) fn can_start_substitution(self) -> bool {
+        !self.in_single_quote
+            && !self.in_dollar_single_quote
+            && !self.escaped
+            && !self.pending_dollar_single_quote
+    }
+
     /// Updates quote/escape state after consuming one byte.
     pub(crate) fn observe_byte_for_boundary(
         &mut self,

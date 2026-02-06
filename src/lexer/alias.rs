@@ -112,7 +112,10 @@ impl AliasExpander {
     }
 
     /// Expands aliases for token slices.
-    pub fn expand_tokens(&self, tokens: &[Token]) -> Result<AliasExpansionResult, AliasExpansionError> {
+    pub fn expand_tokens(
+        &self,
+        tokens: &[Token],
+    ) -> Result<AliasExpansionResult, AliasExpansionError> {
         let input_tokens: Vec<AliasExpandedToken> = tokens
             .iter()
             .cloned()

@@ -1,6 +1,8 @@
 //! Quote-state helpers for token scanning.
 
-use crate::lexer::diagnostics::{DiagnosticCode, FatalLexError, LexDiagnostic};
+use crate::lexer::diagnostics::{
+    DiagnosticCode, FatalLexError, LexDiagnostic, near_text_snippet, suggestion_close_quote,
+};
 use crate::lexer::span::{ByteOffset, SourceId, Span};
 use crate::lexer::token::{QuoteMarker, QuoteProvenance, TokenOffset, TokenRange};
 
@@ -89,37 +91,35 @@ pub(crate) fn unterminated_quote_error(
     end: ByteOffset,
 ) -> FatalLexError {
     let span = Span::new(source_id, open.source_start, end);
-    let context = extract_near_text(input, open.source_start, end);
+    let near_text = near_text_snippet(input, open.source_start, end);
 
     match open.kind {
-        OpenQuoteKind::Single => FatalLexError::UnterminatedSingleQuote(LexDiagnostic::new(
-            DiagnosticCode::UnterminatedSingleQuote,
-            format!("unterminated single quote starting near `{context}`"),
-            span,
-        )),
-        OpenQuoteKind::Double => FatalLexError::UnterminatedDoubleQuote(LexDiagnostic::new(
-            DiagnosticCode::UnterminatedDoubleQuote,
-            format!("unterminated double quote starting near `{context}`"),
-            span,
-        )),
-        OpenQuoteKind::DollarSingle => {
-            FatalLexError::UnterminatedDollarSingleQuote(LexDiagnostic::new(
-                DiagnosticCode::UnterminatedDollarSingleQuote,
-                format!("unterminated dollar-single quote starting near `{context}`"),
+        OpenQuoteKind::Single => {
+            FatalLexError::UnterminatedSingleQuote(LexDiagnostic::with_context(
+                DiagnosticCode::UnterminatedSingleQuote,
+                "unterminated single quote",
                 span,
+                near_text.clone(),
+                Some(suggestion_close_quote("single quote", "'")),
+            ))
+        }
+        OpenQuoteKind::Double => {
+            FatalLexError::UnterminatedDoubleQuote(LexDiagnostic::with_context(
+                DiagnosticCode::UnterminatedDoubleQuote,
+                "unterminated double quote",
+                span,
+                near_text.clone(),
+                Some(suggestion_close_quote("double quote", "\"")),
+            ))
+        }
+        OpenQuoteKind::DollarSingle => {
+            FatalLexError::UnterminatedDollarSingleQuote(LexDiagnostic::with_context(
+                DiagnosticCode::UnterminatedDollarSingleQuote,
+                "unterminated dollar-single quote",
+                span,
+                near_text,
+                Some(suggestion_close_quote("dollar-single quote", "'")),
             ))
         }
     }
-}
-
-fn extract_near_text(input: &str, start: ByteOffset, end: ByteOffset) -> String {
-    let start_index = start.as_usize().min(input.len());
-    let end_index = end.as_usize().min(input.len());
-    let slice = if start_index <= end_index {
-        &input[start_index..end_index]
-    } else {
-        ""
-    };
-    let preview: String = slice.chars().take(16).collect();
-    preview.replace('\n', "\\n")
 }

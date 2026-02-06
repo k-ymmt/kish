@@ -1,6 +1,9 @@
 //! Here-document queue and body helper types.
 
-use crate::lexer::diagnostics::{DiagnosticCode, FatalLexError, LexDiagnostic};
+use crate::lexer::diagnostics::{
+    DiagnosticCode, FatalLexError, LexDiagnostic, near_text_snippet,
+    suggestion_add_heredoc_delimiter,
+};
 use crate::lexer::span::{ByteOffset, SourceId, Span};
 use crate::lexer::token::{OperatorKind, QuoteMarker, Token};
 
@@ -136,15 +139,18 @@ pub(crate) fn quote_remove_delimiter(raw: &str, quote_markers: &[QuoteMarker]) -
 pub(crate) fn delimiter_not_found_diagnostic(
     source_id: SourceId,
     spec: &PendingHereDocSpec,
+    input: &str,
     end: ByteOffset,
 ) -> LexDiagnostic {
-    LexDiagnostic::new(
+    LexDiagnostic::with_context(
         DiagnosticCode::HereDocDelimiterNotFound,
         format!(
             "here-document delimiter `{}` was not found before end of input",
             spec.delimiter_key
         ),
         Span::new(source_id, spec.delimiter_span.start, end),
+        near_text_snippet(input, spec.delimiter_span.start, end),
+        Some(suggestion_add_heredoc_delimiter(&spec.delimiter_key)),
     )
 }
 
@@ -152,9 +158,12 @@ pub(crate) fn delimiter_not_found_diagnostic(
 pub(crate) fn delimiter_not_found_error(
     source_id: SourceId,
     spec: &PendingHereDocSpec,
+    input: &str,
     end: ByteOffset,
 ) -> FatalLexError {
-    FatalLexError::HereDocDelimiterNotFound(delimiter_not_found_diagnostic(source_id, spec, end))
+    FatalLexError::HereDocDelimiterNotFound(delimiter_not_found_diagnostic(
+        source_id, spec, input, end,
+    ))
 }
 
 /// Returns line contents without trailing newline for delimiter matching.

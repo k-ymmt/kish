@@ -175,7 +175,14 @@ fn next_token_reports_missing_here_doc_delimiter_as_fatal() {
     }
 
     match lexer.next_token() {
-        Err(FatalLexError::HereDocDelimiterNotFound(_)) => {}
+        Err(FatalLexError::HereDocDelimiterNotFound(diagnostic)) => {
+            assert_eq!(diagnostic.code, DiagnosticCode::HereDocDelimiterNotFound);
+            assert_eq!(diagnostic.near_text.as_deref(), Some("EOF\\nbody\\n"));
+            assert_eq!(
+                diagnostic.suggestion.as_deref(),
+                Some("add a line containing delimiter `EOF` exactly.")
+            );
+        }
         other => panic!("unexpected result: {other:?}"),
     }
 }
@@ -202,6 +209,7 @@ fn warning_policy_keeps_partial_body_and_records_warning() {
         LexerMode::Normal,
         LexerOptions {
             here_doc_eof_policy: HereDocEofPolicy::Warning,
+            ..Default::default()
         },
     );
 
@@ -219,6 +227,11 @@ fn warning_policy_keeps_partial_body_and_records_warning() {
     let warnings = lexer.warnings();
     assert_eq!(warnings.len(), 1);
     assert_eq!(warnings[0].code, DiagnosticCode::HereDocDelimiterNotFound);
+    assert_eq!(warnings[0].near_text.as_deref(), Some("EOF\\nbody\\n"));
+    assert_eq!(
+        warnings[0].suggestion.as_deref(),
+        Some("add a line containing delimiter `EOF` exactly.")
+    );
 
     let captures = lexer.here_doc_bodies();
     assert_eq!(captures.len(), 1);
@@ -234,6 +247,7 @@ fn warning_policy_captures_remaining_pending_heredocs_as_empty() {
         LexerMode::Normal,
         LexerOptions {
             here_doc_eof_policy: HereDocEofPolicy::Warning,
+            ..Default::default()
         },
     );
 
@@ -263,6 +277,7 @@ fn boundary_api_is_complete_in_warning_mode() {
         LexerMode::Normal,
         LexerOptions {
             here_doc_eof_policy: HereDocEofPolicy::Warning,
+            ..Default::default()
         },
     );
 
@@ -298,6 +313,7 @@ fn drain_accessors_clear_collected_values() {
         LexerMode::Normal,
         LexerOptions {
             here_doc_eof_policy: HereDocEofPolicy::Warning,
+            ..Default::default()
         },
     );
 

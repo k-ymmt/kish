@@ -2,11 +2,12 @@
 #[path = "../../src/lexer/span.rs"]
 pub mod span;
 
-mod boundary_api;
 mod alias_substitution;
+mod boundary_api;
 mod comment_handling;
 mod constructor_mode;
 mod cursor_position;
+mod diagnostic_stability;
 mod error_types;
 mod heredoc_mode_machine;
 mod line_continuation;

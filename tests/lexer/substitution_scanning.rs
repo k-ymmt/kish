@@ -157,6 +157,19 @@ fn unterminated_substitutions_return_fatal_error_from_next_token() {
 }
 
 #[test]
+fn malformed_arithmetic_expansion_returns_fatal_error() {
+    match Lexer::new("$(( ))", LexerMode::Normal).next_token() {
+        Err(FatalLexError::MalformedArithmeticExpansion(_)) => {}
+        other => panic!("unexpected result: {other:?}"),
+    }
+
+    match Lexer::new("$((1+2) ))", LexerMode::Normal).next_token() {
+        Err(FatalLexError::MalformedArithmeticExpansion(_)) => {}
+        other => panic!("unexpected result: {other:?}"),
+    }
+}
+
+#[test]
 fn boundary_reports_unterminated_substitution_need_more_reason() {
     match Lexer::new("${x", LexerMode::Normal)
         .tokenize_complete_command_boundary()

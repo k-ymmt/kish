@@ -372,10 +372,7 @@ impl Token {
     }
 
     /// Classifies token in parser context with default conversion options.
-    pub fn classify_for_parser(
-        &self,
-        delimiter: Option<DelimiterContext>,
-    ) -> ParserTokenClass {
+    pub fn classify_for_parser(&self, delimiter: Option<DelimiterContext>) -> ParserTokenClass {
         self.classify_for_parser_with_options(delimiter, ParserClassificationOptions::default())
     }
 

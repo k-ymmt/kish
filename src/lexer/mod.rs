@@ -36,12 +36,12 @@ use crate::lexer::substitution::{
 use std::collections::VecDeque;
 use std::mem;
 
-pub use diagnostics::{DiagnosticCode, FatalLexError, LexDiagnostic, RecoverableLexError};
-pub use heredoc::HereDocBodyCapture;
 pub use alias::{
     AliasExpandedToken, AliasExpander, AliasExpansionError, AliasExpansionOptions,
     AliasExpansionResult, AliasTokenOrigin,
 };
+pub use diagnostics::{DiagnosticCode, FatalLexError, LexDiagnostic, RecoverableLexError};
+pub use heredoc::HereDocBodyCapture;
 pub use span::{ByteOffset, SourceId, Span};
 pub use token::{
     BoundaryResult, CompleteCommandTokens, DelimiterContext, LexStep, NeedMoreInput,
@@ -72,17 +72,29 @@ pub enum HereDocEofPolicy {
     Warning,
 }
 
+/// Recovery policy for incomplete lexical states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryPolicy {
+    /// Report incomplete states as continuation points.
+    Interactive,
+    /// Treat incomplete states as fatal lexer errors.
+    NonInteractive,
+}
+
 /// Configuration options for lexer behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LexerOptions {
     /// EOF policy for here-document body scanning.
     pub here_doc_eof_policy: HereDocEofPolicy,
+    /// Recovery policy for incomplete lexer states.
+    pub recovery_policy: RecoveryPolicy,
 }
 
 impl Default for LexerOptions {
     fn default() -> Self {
         Self {
             here_doc_eof_policy: HereDocEofPolicy::StrictError,
+            recovery_policy: RecoveryPolicy::Interactive,
         }
     }
 }
@@ -421,8 +433,7 @@ impl<'a> Lexer<'a> {
 
                     if let TokenKind::Operator(kind) = token.kind {
                         if is_io_here_operator(kind) {
-                            expecting_delimiter =
-                                Some((is_strip_tabs_operator(kind), token.span));
+                            expecting_delimiter = Some((is_strip_tabs_operator(kind), token.span));
                         }
                     }
 
@@ -514,12 +525,18 @@ impl<'a> Lexer<'a> {
 
             match self.options.here_doc_eof_policy {
                 HereDocEofPolicy::StrictError => {
-                    return Err(delimiter_not_found_error(self.source_id, &spec, body_end));
+                    return Err(delimiter_not_found_error(
+                        self.source_id,
+                        &spec,
+                        self.input,
+                        body_end,
+                    ));
                 }
                 HereDocEofPolicy::Warning => {
                     self.warnings.push(delimiter_not_found_diagnostic(
                         self.source_id,
                         &spec,
+                        self.input,
                         body_end,
                     ));
                     self.collected_heredoc_bodies.push(HereDocBodyCapture {
@@ -546,6 +563,7 @@ impl<'a> Lexer<'a> {
             self.warnings.push(delimiter_not_found_diagnostic(
                 self.source_id,
                 &spec,
+                self.input,
                 eof,
             ));
             self.collected_heredoc_bodies.push(HereDocBodyCapture {
@@ -609,21 +627,27 @@ impl<'a> Lexer<'a> {
     ///   [`BoundaryResult::Complete`]
     pub fn tokenize_complete_command_boundary(&mut self) -> Result<BoundaryResult, FatalLexError> {
         if let Some(reason) = self.detect_incomplete_input_reason()? {
-            return Ok(BoundaryResult::NeedMoreInput(NeedMoreInput::new(
-                self.cursor.offset(),
-                reason,
-            )));
+            if self.options.recovery_policy == RecoveryPolicy::Interactive {
+                return Ok(BoundaryResult::NeedMoreInput(NeedMoreInput::new(
+                    self.cursor.offset(),
+                    reason,
+                )));
+            }
+            return Err(self.fatal_error_for_need_more_reason(reason));
         }
 
         let mut tokens = Vec::new();
         loop {
             let step = match self.next_token() {
                 Ok(step) => step,
-                Err(FatalLexError::HereDocDelimiterNotFound(_)) => {
-                    return Ok(BoundaryResult::NeedMoreInput(NeedMoreInput::new(
-                        self.cursor.offset(),
-                        NeedMoreReason::HereDocDelimiterNotFound,
-                    )));
+                Err(FatalLexError::HereDocDelimiterNotFound(diagnostic)) => {
+                    if self.options.recovery_policy == RecoveryPolicy::Interactive {
+                        return Ok(BoundaryResult::NeedMoreInput(NeedMoreInput::new(
+                            self.cursor.offset(),
+                            NeedMoreReason::HereDocDelimiterNotFound,
+                        )));
+                    }
+                    return Err(FatalLexError::HereDocDelimiterNotFound(diagnostic));
                 }
                 Err(error) => return Err(error),
             };
@@ -638,10 +662,13 @@ impl<'a> Lexer<'a> {
                 }
                 LexStep::EndOfInput => break,
                 LexStep::Recoverable(error) => {
-                    return Ok(BoundaryResult::NeedMoreInput(NeedMoreInput::new(
-                        self.cursor.offset(),
-                        NeedMoreReason::Recoverable(error),
-                    )));
+                    if self.options.recovery_policy == RecoveryPolicy::Interactive {
+                        return Ok(BoundaryResult::NeedMoreInput(NeedMoreInput::new(
+                            self.cursor.offset(),
+                            NeedMoreReason::Recoverable(error),
+                        )));
+                    }
+                    return Err(self.fatal_error_from_recoverable(error));
                 }
             }
         }
@@ -831,5 +858,96 @@ impl<'a> Lexer<'a> {
             marker_start,
             lexeme_bytes.len(),
         );
+    }
+
+    fn fatal_error_for_need_more_reason(&self, reason: NeedMoreReason) -> FatalLexError {
+        match reason {
+            NeedMoreReason::TrailingBackslash => {
+                let end = ByteOffset::from_usize(self.input.len());
+                let start = ByteOffset::from_usize(end.as_usize().saturating_sub(1));
+                let span = Span::new(self.source_id, start, end);
+                FatalLexError::IncompleteInput(LexDiagnostic::with_context(
+                    DiagnosticCode::IncompleteInput,
+                    "incomplete input: trailing backslash",
+                    span,
+                    diagnostics::near_text_snippet(self.input, start, end),
+                    Some("remove the trailing backslash or continue on the next line.".to_string()),
+                ))
+            }
+            NeedMoreReason::Recoverable(error) => self.fatal_error_from_recoverable(error),
+            _ => {
+                if let Some(error) = self.probe_fatal_from_remaining_input() {
+                    error
+                } else {
+                    let checkpoint = self.cursor.offset();
+                    let span = Span::new(self.source_id, checkpoint, checkpoint);
+                    FatalLexError::IncompleteInput(LexDiagnostic::with_context(
+                        DiagnosticCode::IncompleteInput,
+                        "incomplete input",
+                        span,
+                        None,
+                        Some("provide additional input to complete the command.".to_string()),
+                    ))
+                }
+            }
+        }
+    }
+
+    fn fatal_error_from_recoverable(&self, error: RecoverableLexError) -> FatalLexError {
+        match error {
+            RecoverableLexError::IncompleteInput(diagnostic) => {
+                FatalLexError::IncompleteInput(diagnostic)
+            }
+        }
+    }
+
+    fn probe_fatal_from_remaining_input(&self) -> Option<FatalLexError> {
+        let base = self.cursor.offset().as_usize();
+        if base >= self.input.len() {
+            return None;
+        }
+
+        let mut probe = Self::with_options(
+            &self.input[base..],
+            self.mode,
+            LexerOptions {
+                recovery_policy: RecoveryPolicy::Interactive,
+                ..self.options
+            },
+        );
+
+        loop {
+            match probe.next_token() {
+                Err(mut error) => {
+                    Self::rebase_fatal_error(&mut error, base);
+                    return Some(error);
+                }
+                Ok(LexStep::EndOfInput) => return None,
+                Ok(_) => {}
+            }
+        }
+    }
+
+    fn rebase_fatal_error(error: &mut FatalLexError, base: usize) {
+        match error {
+            FatalLexError::InternalInvariant(diagnostic)
+            | FatalLexError::UnterminatedSingleQuote(diagnostic)
+            | FatalLexError::UnterminatedDoubleQuote(diagnostic)
+            | FatalLexError::UnterminatedDollarSingleQuote(diagnostic)
+            | FatalLexError::UnterminatedParameterExpansion(diagnostic)
+            | FatalLexError::UnterminatedCommandSubstitution(diagnostic)
+            | FatalLexError::UnterminatedBackquotedCommandSubstitution(diagnostic)
+            | FatalLexError::UnterminatedArithmeticExpansion(diagnostic)
+            | FatalLexError::MalformedArithmeticExpansion(diagnostic)
+            | FatalLexError::SubstitutionRecursionDepthExceeded(diagnostic)
+            | FatalLexError::HereDocDelimiterNotFound(diagnostic)
+            | FatalLexError::IncompleteInput(diagnostic) => {
+                diagnostic.span = Span::new(
+                    diagnostic.span.source_id,
+                    ByteOffset::from_usize(base.saturating_add(diagnostic.span.start.as_usize())),
+                    ByteOffset::from_usize(base.saturating_add(diagnostic.span.end.as_usize())),
+                );
+            }
+        }
     }
 }

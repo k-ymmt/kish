@@ -215,7 +215,11 @@ fn classify_for_parser_never_converts_non_plain_or_non_token_values() {
         ParserTokenClass::Token
     );
 
-    let operator = Token::new(TokenKind::Operator(OperatorKind::Greater), ">".to_string(), span);
+    let operator = Token::new(
+        TokenKind::Operator(OperatorKind::Greater),
+        ">".to_string(),
+        span,
+    );
     assert_eq!(
         operator.classify_for_parser(Some(DelimiterContext::Greater)),
         ParserTokenClass::Token

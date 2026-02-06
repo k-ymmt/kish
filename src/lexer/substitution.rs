@@ -1,7 +1,10 @@
 //! Recursive substitution scanning helpers.
 
 use crate::lexer::cursor::Cursor;
-use crate::lexer::diagnostics::{DiagnosticCode, FatalLexError, LexDiagnostic};
+use crate::lexer::diagnostics::{
+    DiagnosticCode, FatalLexError, LexDiagnostic, near_text_snippet,
+    suggestion_fix_arithmetic_expansion,
+};
 use crate::lexer::span::{ByteOffset, SourceId, Span};
 use crate::lexer::token::{
     NeedMoreReason, SubstitutionKind, SubstitutionMarker, TokenOffset, TokenRange,
@@ -25,6 +28,7 @@ pub(crate) enum SubstitutionScanErrorKind {
     UnterminatedCommandSubstitution,
     UnterminatedBackquotedCommandSubstitution,
     UnterminatedArithmeticExpansion,
+    MalformedArithmeticExpansion,
     RecursionDepthExceeded,
 }
 
@@ -107,6 +111,7 @@ pub(crate) fn need_more_reason_from_scan_error(
         SubstitutionScanErrorKind::UnterminatedArithmeticExpansion => {
             Some(NeedMoreReason::UnterminatedArithmeticExpansion)
         }
+        SubstitutionScanErrorKind::MalformedArithmeticExpansion => None,
         SubstitutionScanErrorKind::RecursionDepthExceeded => None,
     }
 }
@@ -118,45 +123,66 @@ pub(crate) fn fatal_error_from_scan_error(
     error: SubstitutionScanError,
 ) -> FatalLexError {
     let span = Span::new(source_id, error.source_start, error.source_end);
-    let context = extract_near_text(input, error.source_start, error.source_end);
+    let near_text = near_text_snippet(input, error.source_start, error.source_end);
 
     match error.kind {
         SubstitutionScanErrorKind::UnterminatedParameterExpansion => {
-            FatalLexError::UnterminatedParameterExpansion(LexDiagnostic::new(
+            FatalLexError::UnterminatedParameterExpansion(LexDiagnostic::with_context(
                 DiagnosticCode::UnterminatedParameterExpansion,
-                format!("unterminated parameter expansion starting near `{context}`"),
+                "unterminated parameter expansion",
                 span,
+                near_text.clone(),
+                Some("close the parameter expansion with `}`.".to_string()),
             ))
         }
         SubstitutionScanErrorKind::UnterminatedCommandSubstitution => {
-            FatalLexError::UnterminatedCommandSubstitution(LexDiagnostic::new(
+            FatalLexError::UnterminatedCommandSubstitution(LexDiagnostic::with_context(
                 DiagnosticCode::UnterminatedCommandSubstitution,
-                format!("unterminated command substitution starting near `{context}`"),
+                "unterminated command substitution",
                 span,
+                near_text.clone(),
+                Some("close the command substitution with `)`.".to_string()),
             ))
         }
         SubstitutionScanErrorKind::UnterminatedBackquotedCommandSubstitution => {
-            FatalLexError::UnterminatedBackquotedCommandSubstitution(LexDiagnostic::new(
+            FatalLexError::UnterminatedBackquotedCommandSubstitution(LexDiagnostic::with_context(
                 DiagnosticCode::UnterminatedBackquotedCommandSubstitution,
-                format!("unterminated backquoted substitution starting near `{context}`"),
+                "unterminated backquoted command substitution",
                 span,
+                near_text.clone(),
+                Some("close the backquoted command substitution with `` ` ``.".to_string()),
             ))
         }
         SubstitutionScanErrorKind::UnterminatedArithmeticExpansion => {
-            FatalLexError::UnterminatedArithmeticExpansion(LexDiagnostic::new(
+            FatalLexError::UnterminatedArithmeticExpansion(LexDiagnostic::with_context(
                 DiagnosticCode::UnterminatedArithmeticExpansion,
-                format!("unterminated arithmetic expansion starting near `{context}`"),
+                "unterminated arithmetic expansion",
                 span,
+                near_text.clone(),
+                Some("close the arithmetic expansion with `))`.".to_string()),
+            ))
+        }
+        SubstitutionScanErrorKind::MalformedArithmeticExpansion => {
+            FatalLexError::MalformedArithmeticExpansion(LexDiagnostic::with_context(
+                DiagnosticCode::MalformedArithmeticExpansion,
+                "malformed arithmetic expansion",
+                span,
+                near_text.clone(),
+                Some(suggestion_fix_arithmetic_expansion()),
             ))
         }
         SubstitutionScanErrorKind::RecursionDepthExceeded => {
-            FatalLexError::SubstitutionRecursionDepthExceeded(LexDiagnostic::new(
+            FatalLexError::SubstitutionRecursionDepthExceeded(LexDiagnostic::with_context(
                 DiagnosticCode::SubstitutionRecursionDepthExceeded,
                 format!(
-                    "substitution recursion depth {} exceeded limit {} near `{context}`",
+                    "substitution recursion depth {} exceeded limit {}",
                     error.depth, MAX_SUBSTITUTION_DEPTH
                 ),
                 span,
+                near_text,
+                Some(format!(
+                    "reduce nested substitutions to at most {MAX_SUBSTITUTION_DEPTH} levels."
+                )),
             ))
         }
     }
@@ -327,19 +353,34 @@ fn scan_arithmetic_substitution(
 
     let mut parens = 1usize;
     let mut state = SubstitutionQuoteState::default();
+    let mut saw_non_whitespace = false;
 
     while !cursor.is_eof(input) {
         if state.can_start_substitution() {
+            let before = token_bytes.len();
             if let Some(scan) =
                 try_scan_dollar(cursor, input, token_bytes, nested_markers, depth + 1)?
             {
                 nested_markers.push(marker_from_scan(scan));
+                if token_bytes[before..]
+                    .iter()
+                    .any(|byte| !byte.is_ascii_whitespace())
+                {
+                    saw_non_whitespace = true;
+                }
                 continue;
             }
+            let before = token_bytes.len();
             if let Some(scan) =
                 try_scan_backquote(cursor, input, token_bytes, nested_markers, depth + 1)?
             {
                 nested_markers.push(marker_from_scan(scan));
+                if token_bytes[before..]
+                    .iter()
+                    .any(|byte| !byte.is_ascii_whitespace())
+                {
+                    saw_non_whitespace = true;
+                }
                 continue;
             }
         }
@@ -354,21 +395,47 @@ fn scan_arithmetic_substitution(
                 let consumed = consume_byte(cursor, input, token_bytes);
                 state.observe(consumed, next);
                 parens += 1;
+                saw_non_whitespace = true;
                 continue;
             }
             if byte == b')' {
-                if parens == 1 && cursor.peek_next_byte(input) == Some(b')') {
-                    let next = cursor.peek_next_byte(input);
-                    let consumed = consume_byte(cursor, input, token_bytes);
-                    state.observe(consumed, next);
-                    let next = cursor.peek_next_byte(input);
-                    let consumed = consume_byte(cursor, input, token_bytes);
-                    state.observe(consumed, next);
-                    return Ok(SubstitutionScan {
-                        kind: SubstitutionKind::ArithmeticExpansion,
-                        token_start,
-                        token_end: token_bytes.len(),
-                    });
+                if parens == 1 {
+                    match cursor.peek_next_byte(input) {
+                        Some(b')') => {
+                            if !saw_non_whitespace {
+                                return Err(SubstitutionScanError {
+                                    kind: SubstitutionScanErrorKind::MalformedArithmeticExpansion,
+                                    source_start,
+                                    source_end: ByteOffset::from_usize(
+                                        cursor.offset().as_usize().saturating_add(2),
+                                    ),
+                                    depth,
+                                });
+                            }
+                            let next = cursor.peek_next_byte(input);
+                            let consumed = consume_byte(cursor, input, token_bytes);
+                            state.observe(consumed, next);
+                            let next = cursor.peek_next_byte(input);
+                            let consumed = consume_byte(cursor, input, token_bytes);
+                            state.observe(consumed, next);
+                            return Ok(SubstitutionScan {
+                                kind: SubstitutionKind::ArithmeticExpansion,
+                                token_start,
+                                token_end: token_bytes.len(),
+                            });
+                        }
+                        Some(_) => {
+                            return Err(SubstitutionScanError {
+                                kind: SubstitutionScanErrorKind::MalformedArithmeticExpansion,
+                                source_start,
+                                source_end: ByteOffset::from_usize(
+                                    cursor.offset().as_usize().saturating_add(1),
+                                ),
+                                depth,
+                            });
+                        }
+                        None => {}
+                    }
                 }
                 if parens > 1 {
                     let next = cursor.peek_next_byte(input);
@@ -383,6 +450,9 @@ fn scan_arithmetic_substitution(
         let next = cursor.peek_next_byte(input);
         let consumed = consume_byte(cursor, input, token_bytes);
         state.observe(consumed, next);
+        if !consumed.is_ascii_whitespace() {
+            saw_non_whitespace = true;
+        }
     }
 
     Err(SubstitutionScanError {
@@ -470,18 +540,6 @@ fn peek_at(cursor: &Cursor, input: &str, distance: usize) -> Option<u8> {
         .as_bytes()
         .get(cursor.offset().as_usize().saturating_add(distance))
         .copied()
-}
-
-fn extract_near_text(input: &str, start: ByteOffset, end: ByteOffset) -> String {
-    let start_index = start.as_usize().min(input.len());
-    let end_index = end.as_usize().min(input.len());
-    let slice = if start_index <= end_index {
-        &input[start_index..end_index]
-    } else {
-        ""
-    };
-    let preview: String = slice.chars().take(16).collect();
-    preview.replace('\n', "\\n")
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

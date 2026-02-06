@@ -95,7 +95,10 @@ fn expands_after_command_separator() {
         vec![
             (TokenKind::Token, "echo".to_string()),
             (TokenKind::Token, "x".to_string()),
-            (TokenKind::Operator(OperatorKind::Semicolon), ";".to_string()),
+            (
+                TokenKind::Operator(OperatorKind::Semicolon),
+                ";".to_string()
+            ),
             (TokenKind::Token, "ls".to_string()),
             (TokenKind::Newline, "\n".to_string()),
         ]

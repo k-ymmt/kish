@@ -12,7 +12,7 @@ use crate::parser::classifier::{
     ClassificationContext, ClassificationOptions, ClassifiedTokenKind, Classifier, NameContext,
     ReservedWord, ReservedWordPolicy, split_assignment_word,
 };
-use crate::parser::error::ParseError;
+use crate::parser::error::{ParseError, ParseErrorKind};
 use crate::parser::recovery::{NeedMoreInputReason, ParseDiagnostic};
 use crate::parser::token_stream::{TokenStream, TokenStreamError};
 
@@ -215,7 +215,17 @@ impl<'a> Parser<'a> {
 
             let _operator_token = self.consume_operator_kind(operator_kind)?;
             self.parse_linebreak()?;
-            let pipeline = self.parse_pipeline_nonterminal()?;
+            let pipeline = match operator_kind {
+                OperatorKind::AndIf => Self::map_unexpected_eof_to_need_more(
+                    self.parse_pipeline_nonterminal(),
+                    NeedMoreInputReason::TrailingAndIfOperator,
+                )?,
+                OperatorKind::OrIf => Self::map_unexpected_eof_to_need_more(
+                    self.parse_pipeline_nonterminal(),
+                    NeedMoreInputReason::TrailingOrIfOperator,
+                )?,
+                _ => unreachable!("only && and || are accepted here"),
+            };
             tail.push((operator_kind, pipeline));
         }
 
@@ -242,7 +252,11 @@ impl<'a> Parser<'a> {
         while self.peek_operator_kind(0)? == Some(OperatorKind::Pipe) {
             let _pipe = self.consume_operator_kind(OperatorKind::Pipe)?;
             self.parse_linebreak()?;
-            commands.push(self.parse_command_nonterminal()?);
+            let command = Self::map_unexpected_eof_to_need_more(
+                self.parse_command_nonterminal(),
+                NeedMoreInputReason::TrailingPipeOperator,
+            )?;
+            commands.push(command);
         }
 
         let first_span = span_of_command(&commands[0]);
@@ -390,8 +404,14 @@ impl<'a> Parser<'a> {
 
     fn parse_subshell_nonterminal(&mut self) -> ParseResult<(CompoundCommandAst, Span)> {
         let start = self.consume_operator_kind(OperatorKind::LeftParen)?;
-        let body = self.parse_compound_list_nonterminal(StopSet::right_paren())?;
-        let end = self.consume_operator_kind(OperatorKind::RightParen)?;
+        let body = Self::map_unexpected_eof_to_need_more(
+            self.parse_compound_list_nonterminal(StopSet::right_paren()),
+            NeedMoreInputReason::UnclosedSubshell,
+        )?;
+        let end = Self::map_unexpected_eof_to_need_more(
+            self.consume_operator_kind(OperatorKind::RightParen),
+            NeedMoreInputReason::UnclosedSubshell,
+        )?;
         let span = merge_spans(start.span, end.span);
         let kind = self.build_compound_subshell(body)?;
         Ok((kind, span))
@@ -399,8 +419,14 @@ impl<'a> Parser<'a> {
 
     fn parse_brace_group_nonterminal(&mut self) -> ParseResult<(CompoundCommandAst, Span)> {
         let start = self.consume_plain_token("{")?;
-        let body = self.parse_compound_list_nonterminal(StopSet::right_brace())?;
-        let end = self.consume_plain_token("}")?;
+        let body = Self::map_unexpected_eof_to_need_more(
+            self.parse_compound_list_nonterminal(StopSet::right_brace()),
+            NeedMoreInputReason::UnclosedBraceGroup,
+        )?;
+        let end = Self::map_unexpected_eof_to_need_more(
+            self.consume_plain_token("}"),
+            NeedMoreInputReason::UnclosedBraceGroup,
+        )?;
         let span = merge_spans(start.span, end.span);
         let kind = self.build_compound_brace_group(body)?;
         Ok((kind, span))
@@ -408,29 +434,58 @@ impl<'a> Parser<'a> {
 
     fn parse_if_clause_nonterminal(&mut self) -> ParseResult<(CompoundCommandAst, Span)> {
         let start = self.consume_reserved_word(ReservedWord::If, ReservedWordPolicy::Any)?;
-        let condition = self.parse_compound_list_nonterminal(StopSet::then_only())?;
-        let _then = self.consume_reserved_word(ReservedWord::Then, ReservedWordPolicy::Any)?;
-        let then_body = self.parse_compound_list_nonterminal(StopSet::else_elif_fi())?;
+        let condition = Self::map_unexpected_eof_to_need_more(
+            self.parse_compound_list_nonterminal(StopSet::then_only()),
+            NeedMoreInputReason::UnclosedIfClause,
+        )?;
+        let _then = Self::map_unexpected_eof_to_need_more(
+            self.consume_reserved_word(ReservedWord::Then, ReservedWordPolicy::Any),
+            NeedMoreInputReason::UnclosedIfClause,
+        )?;
+        let then_body = Self::map_unexpected_eof_to_need_more(
+            self.parse_compound_list_nonterminal(StopSet::else_elif_fi()),
+            NeedMoreInputReason::UnclosedIfClause,
+        )?;
 
         let mut elif_arms = Vec::new();
         while self.peek_reserved_word(ReservedWordPolicy::Any)? == Some(ReservedWord::Elif) {
-            let _elif = self.consume_reserved_word(ReservedWord::Elif, ReservedWordPolicy::Any)?;
-            let elif_condition = self.parse_compound_list_nonterminal(StopSet::then_only())?;
-            let _then = self.consume_reserved_word(ReservedWord::Then, ReservedWordPolicy::Any)?;
-            let elif_body = self.parse_compound_list_nonterminal(StopSet::else_elif_fi())?;
+            let _elif = Self::map_unexpected_eof_to_need_more(
+                self.consume_reserved_word(ReservedWord::Elif, ReservedWordPolicy::Any),
+                NeedMoreInputReason::UnclosedIfClause,
+            )?;
+            let elif_condition = Self::map_unexpected_eof_to_need_more(
+                self.parse_compound_list_nonterminal(StopSet::then_only()),
+                NeedMoreInputReason::UnclosedIfClause,
+            )?;
+            let _then = Self::map_unexpected_eof_to_need_more(
+                self.consume_reserved_word(ReservedWord::Then, ReservedWordPolicy::Any),
+                NeedMoreInputReason::UnclosedIfClause,
+            )?;
+            let elif_body = Self::map_unexpected_eof_to_need_more(
+                self.parse_compound_list_nonterminal(StopSet::else_elif_fi()),
+                NeedMoreInputReason::UnclosedIfClause,
+            )?;
             elif_arms.push((elif_condition, elif_body));
         }
 
-        let else_body = if self.peek_reserved_word(ReservedWordPolicy::Any)?
-            == Some(ReservedWord::Else)
-        {
-            let _else = self.consume_reserved_word(ReservedWord::Else, ReservedWordPolicy::Any)?;
-            Some(self.parse_compound_list_nonterminal(StopSet::fi_only())?)
-        } else {
-            None
-        };
+        let else_body =
+            if self.peek_reserved_word(ReservedWordPolicy::Any)? == Some(ReservedWord::Else) {
+                let _else = Self::map_unexpected_eof_to_need_more(
+                    self.consume_reserved_word(ReservedWord::Else, ReservedWordPolicy::Any),
+                    NeedMoreInputReason::UnclosedIfClause,
+                )?;
+                Some(Self::map_unexpected_eof_to_need_more(
+                    self.parse_compound_list_nonterminal(StopSet::fi_only()),
+                    NeedMoreInputReason::UnclosedIfClause,
+                )?)
+            } else {
+                None
+            };
 
-        let end = self.consume_reserved_word(ReservedWord::Fi, ReservedWordPolicy::Any)?;
+        let end = Self::map_unexpected_eof_to_need_more(
+            self.consume_reserved_word(ReservedWord::Fi, ReservedWordPolicy::Any),
+            NeedMoreInputReason::UnclosedIfClause,
+        )?;
         let span = merge_spans(start.span, end.span);
         let clause = self.build_if_clause(condition, then_body, elif_arms, else_body, span)?;
         let kind = self.build_compound_if(clause)?;
@@ -494,12 +549,18 @@ impl<'a> Parser<'a> {
         let start = self.consume_reserved_word(ReservedWord::Case, ReservedWordPolicy::Any)?;
         let word = self.parse_plain_word_nonterminal()?;
         self.parse_linebreak()?;
-        let _in = self.consume_reserved_word(ReservedWord::In, ReservedWordPolicy::InOnly)?;
+        let _in = Self::map_unexpected_eof_to_need_more(
+            self.consume_reserved_word(ReservedWord::In, ReservedWordPolicy::InOnly),
+            NeedMoreInputReason::UnclosedCaseClause,
+        )?;
         self.parse_linebreak()?;
 
         let mut items = Vec::new();
         while self.peek_reserved_word(ReservedWordPolicy::EsacOnly)? != Some(ReservedWord::Esac) {
-            let item = self.parse_case_item_nonterminal()?;
+            let item = Self::map_unexpected_eof_to_need_more(
+                self.parse_case_item_nonterminal(),
+                NeedMoreInputReason::UnclosedCaseClause,
+            )?;
             let has_terminator = item.terminator.is_some();
             items.push(item);
 
@@ -519,7 +580,10 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let end = self.consume_reserved_word(ReservedWord::Esac, ReservedWordPolicy::EsacOnly)?;
+        let end = Self::map_unexpected_eof_to_need_more(
+            self.consume_reserved_word(ReservedWord::Esac, ReservedWordPolicy::EsacOnly),
+            NeedMoreInputReason::UnclosedCaseClause,
+        )?;
         let span = merge_spans(start.span, end.span);
         let clause = self.build_case_clause(word, items, span)?;
         let kind = self.build_compound_case(clause)?;
@@ -591,9 +655,18 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_do_group_nonterminal(&mut self) -> ParseResult<(ListAst, Span)> {
-        let start = self.consume_reserved_word(ReservedWord::Do, ReservedWordPolicy::InOrDo)?;
-        let body = self.parse_compound_list_nonterminal(StopSet::done_only())?;
-        let end = self.consume_reserved_word(ReservedWord::Done, ReservedWordPolicy::Any)?;
+        let start = Self::map_unexpected_eof_to_need_more(
+            self.consume_reserved_word(ReservedWord::Do, ReservedWordPolicy::InOrDo),
+            NeedMoreInputReason::UnclosedDoGroup,
+        )?;
+        let body = Self::map_unexpected_eof_to_need_more(
+            self.parse_compound_list_nonterminal(StopSet::done_only()),
+            NeedMoreInputReason::UnclosedDoGroup,
+        )?;
+        let end = Self::map_unexpected_eof_to_need_more(
+            self.consume_reserved_word(ReservedWord::Done, ReservedWordPolicy::Any),
+            NeedMoreInputReason::UnclosedDoGroup,
+        )?;
         Ok((body, merge_spans(start.span, end.span)))
     }
 
@@ -1245,6 +1318,20 @@ impl<'a> Parser<'a> {
             self.peek_operator_kind(0)?,
             Some(OperatorKind::Semicolon | OperatorKind::Ampersand)
         ))
+    }
+
+    fn map_unexpected_eof_to_need_more<T>(
+        result: ParseResult<T>,
+        reason: NeedMoreInputReason,
+    ) -> ParseResult<T> {
+        match result {
+            Err(ParseFailure::Error(error))
+                if error.kind == ParseErrorKind::UnexpectedEndOfInput =>
+            {
+                Err(ParseFailure::NeedMoreInput(reason))
+            }
+            other => other,
+        }
     }
 
     fn with_function_body_rule9<T>(

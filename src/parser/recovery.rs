@@ -23,6 +23,22 @@ pub enum NeedMoreInputReason {
     UnterminatedArithmeticExpansion,
     /// A here-doc delimiter is missing.
     HereDocDelimiterNotFound,
+    /// An `if` clause reached EOF before `fi`.
+    UnclosedIfClause,
+    /// A `case` clause reached EOF before `esac`.
+    UnclosedCaseClause,
+    /// A `do` group reached EOF before `done`.
+    UnclosedDoGroup,
+    /// A brace group reached EOF before `}`.
+    UnclosedBraceGroup,
+    /// A subshell reached EOF before `)`.
+    UnclosedSubshell,
+    /// A pipeline ended after a trailing `|`.
+    TrailingPipeOperator,
+    /// An AND-OR list ended after a trailing `&&`.
+    TrailingAndIfOperator,
+    /// An AND-OR list ended after a trailing `||`.
+    TrailingOrIfOperator,
     /// Input is syntactically incomplete according to lexer diagnostics.
     IncompleteInputDiagnostic,
 }

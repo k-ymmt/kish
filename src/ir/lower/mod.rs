@@ -11,7 +11,7 @@ pub mod simple_command;
 pub mod word_program;
 
 use crate::ir::error::IrError;
-use crate::ir::program::{IrModule, IrOptions};
+use crate::ir::program::{IrModule, IrModuleBuilder, IrOptions};
 use crate::parser::ast::{CompleteCommandAst, ProgramAst};
 
 /// Stateful lowering context for parser AST to IR conversion.
@@ -29,6 +29,11 @@ impl LoweringContext {
     /// Returns lowering options.
     pub fn options(&self) -> IrOptions {
         self.options
+    }
+
+    /// Creates a module builder with this lowering context's options.
+    pub fn module_builder(&self) -> IrModuleBuilder {
+        IrModuleBuilder::new(self.options)
     }
 
     /// Lowers one complete command.

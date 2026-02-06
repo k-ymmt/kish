@@ -32,7 +32,7 @@ pub use ids::{
 };
 pub use lower::LoweringContext;
 pub use program::{
-    ArithProgram, CodeObject, CodeObjectBuilder, ConstValue, IrModule, IrOptions, RedirectProgram,
-    WordProgram,
+    ArithProgram, CodeObject, CodeObjectBuilder, ConstValue, IrModule, IrModuleBuilder, IrOptions,
+    RedirectProgram, WordProgram,
 };
 pub use verify::verify_module;

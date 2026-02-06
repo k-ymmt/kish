@@ -1,6 +1,6 @@
 //! VM-facing IR module containers and options.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::ir::bytecode::{
     ArithProgramOp, BranchTarget, Instruction, RedirectProgramOp, WordProgramOp,
@@ -42,7 +42,7 @@ impl Default for IrOptions {
 }
 
 /// Constant-pool entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ConstValue {
     /// Reference to an interned string.
     String(StringId),
@@ -343,5 +343,291 @@ impl IrModule {
     /// Resolves a constant-pool handle.
     pub fn const_at(&self, id: ConstId) -> Option<&ConstValue> {
         self.const_pool.get(id.value() as usize)
+    }
+
+    /// Resolves a string-pool handle.
+    pub fn string_at(&self, id: StringId) -> Option<&str> {
+        self.string_pool
+            .get(id.value() as usize)
+            .map(String::as_str)
+    }
+
+    /// Resolves a symbol-pool handle.
+    pub fn symbol_at(&self, id: SymbolId) -> Option<&str> {
+        self.symbol_pool
+            .get(id.value() as usize)
+            .map(String::as_str)
+    }
+}
+
+/// Deterministic builder for one [`IrModule`] with interned pools.
+#[derive(Debug, Clone)]
+pub struct IrModuleBuilder {
+    options: IrOptions,
+    module: IrModule,
+    string_interner: HashMap<String, StringId>,
+    symbol_interner: HashMap<String, SymbolId>,
+    const_interner: HashMap<ConstValue, ConstId>,
+    total_instructions: usize,
+}
+
+impl IrModuleBuilder {
+    /// Creates an empty module builder with resource limits.
+    pub fn new(options: IrOptions) -> Self {
+        Self {
+            options,
+            module: IrModule::new(),
+            string_interner: HashMap::new(),
+            symbol_interner: HashMap::new(),
+            const_interner: HashMap::new(),
+            total_instructions: 0,
+        }
+    }
+
+    /// Returns builder options.
+    pub fn options(&self) -> IrOptions {
+        self.options
+    }
+
+    /// Finalizes and returns the built module.
+    pub fn finish(self) -> IrModule {
+        self.module
+    }
+
+    /// Interns one string and returns its stable handle.
+    pub fn intern_string(&mut self, value: impl Into<String>) -> Result<StringId, IrError> {
+        let value = value.into();
+        if let Some(id) = self.string_interner.get(value.as_str()).copied() {
+            return Ok(id);
+        }
+
+        let id = StringId::new(Self::next_u32_id(
+            self.module.string_pool.len(),
+            "string_pool",
+        )?);
+        self.module.string_pool.push(value.clone());
+        self.string_interner.insert(value, id);
+        Ok(id)
+    }
+
+    /// Interns one symbol and returns its stable handle.
+    pub fn intern_symbol(&mut self, value: impl Into<String>) -> Result<SymbolId, IrError> {
+        let value = value.into();
+        if let Some(id) = self.symbol_interner.get(value.as_str()).copied() {
+            return Ok(id);
+        }
+
+        let id = SymbolId::new(Self::next_u32_id(
+            self.module.symbol_pool.len(),
+            "symbol_pool",
+        )?);
+        self.module.symbol_pool.push(value.clone());
+        self.symbol_interner.insert(value, id);
+        Ok(id)
+    }
+
+    /// Interns one constant and returns its stable handle.
+    pub fn intern_const(&mut self, value: ConstValue) -> Result<ConstId, IrError> {
+        self.validate_const_value(&value)?;
+        if let Some(id) = self.const_interner.get(&value).copied() {
+            return Ok(id);
+        }
+
+        if self.module.const_pool.len() >= self.options.max_consts {
+            return Err(IrError::limit_exceeded(
+                None,
+                "constant pool limit exceeded",
+                format!(
+                    "max_consts={}, attempted_count={}",
+                    self.options.max_consts,
+                    self.module.const_pool.len().saturating_add(1)
+                ),
+            ));
+        }
+
+        let id = ConstId::new(Self::next_u32_id(
+            self.module.const_pool.len(),
+            "const_pool",
+        )?);
+        self.module.const_pool.push(value.clone());
+        self.const_interner.insert(value, id);
+        Ok(id)
+    }
+
+    /// Interns one string-backed constant.
+    pub fn intern_const_string(&mut self, value: impl Into<String>) -> Result<ConstId, IrError> {
+        let id = self.intern_string(value)?;
+        self.intern_const(ConstValue::String(id))
+    }
+
+    /// Interns one symbol-backed constant.
+    pub fn intern_const_symbol(&mut self, value: impl Into<String>) -> Result<ConstId, IrError> {
+        let id = self.intern_symbol(value)?;
+        self.intern_const(ConstValue::Symbol(id))
+    }
+
+    /// Interns one integer constant.
+    pub fn intern_const_integer(&mut self, value: i64) -> Result<ConstId, IrError> {
+        self.intern_const(ConstValue::Integer(value))
+    }
+
+    /// Adds one code object and returns its assigned stable id.
+    pub fn add_code_object(
+        &mut self,
+        mut code_object: CodeObject,
+    ) -> Result<CodeObjectId, IrError> {
+        if self.module.code_objects.len() >= self.options.max_code_objects {
+            return Err(IrError::limit_exceeded(
+                None,
+                "code object limit exceeded",
+                format!(
+                    "max_code_objects={}, attempted_count={}",
+                    self.options.max_code_objects,
+                    self.module.code_objects.len().saturating_add(1)
+                ),
+            ));
+        }
+
+        let next_total = self
+            .total_instructions
+            .checked_add(code_object.instructions.len())
+            .ok_or_else(|| {
+                IrError::limit_exceeded(
+                    None,
+                    "instruction count overflow",
+                    format!(
+                        "current_total={}, added={}",
+                        self.total_instructions,
+                        code_object.instructions.len()
+                    ),
+                )
+            })?;
+
+        if next_total > self.options.max_instructions {
+            return Err(IrError::limit_exceeded(
+                None,
+                "module instruction limit exceeded",
+                format!(
+                    "max_instructions={}, attempted_total={next_total}",
+                    self.options.max_instructions
+                ),
+            ));
+        }
+
+        let id = CodeObjectId::new(Self::next_u32_id(
+            self.module.code_objects.len(),
+            "code_objects",
+        )?);
+        code_object.id = id;
+        self.module.code_objects.push(code_object);
+        self.total_instructions = next_total;
+        Ok(id)
+    }
+
+    /// Adds one word program and returns its assigned stable id.
+    pub fn add_word_program(&mut self, mut program: WordProgram) -> Result<WordProgramId, IrError> {
+        if program.ops.len() > self.options.max_word_program_ops {
+            return Err(IrError::limit_exceeded(
+                None,
+                "word program op limit exceeded",
+                format!(
+                    "max_word_program_ops={}, attempted_ops={}",
+                    self.options.max_word_program_ops,
+                    program.ops.len()
+                ),
+            ));
+        }
+
+        let id = WordProgramId::new(Self::next_u32_id(
+            self.module.word_programs.len(),
+            "word_programs",
+        )?);
+        program.id = id;
+        self.module.word_programs.push(program);
+        Ok(id)
+    }
+
+    /// Adds one redirect program and returns its assigned stable id.
+    pub fn add_redirect_program(
+        &mut self,
+        mut program: RedirectProgram,
+    ) -> Result<RedirectProgramId, IrError> {
+        if program.ops.len() > self.options.max_redirect_ops {
+            return Err(IrError::limit_exceeded(
+                None,
+                "redirect program op limit exceeded",
+                format!(
+                    "max_redirect_ops={}, attempted_ops={}",
+                    self.options.max_redirect_ops,
+                    program.ops.len()
+                ),
+            ));
+        }
+
+        let id = RedirectProgramId::new(Self::next_u32_id(
+            self.module.redirect_programs.len(),
+            "redirect_programs",
+        )?);
+        program.id = id;
+        self.module.redirect_programs.push(program);
+        Ok(id)
+    }
+
+    /// Adds one arithmetic program and returns its assigned stable id.
+    pub fn add_arith_program(
+        &mut self,
+        mut program: ArithProgram,
+    ) -> Result<ArithProgramId, IrError> {
+        let id = ArithProgramId::new(Self::next_u32_id(
+            self.module.arith_programs.len(),
+            "arith_programs",
+        )?);
+        program.id = id;
+        self.module.arith_programs.push(program);
+        Ok(id)
+    }
+
+    fn validate_const_value(&self, value: &ConstValue) -> Result<(), IrError> {
+        match value {
+            ConstValue::String(id) => {
+                if self.module.string_pool.get(id.value() as usize).is_none() {
+                    return Err(IrError::invariant_violation(
+                        None,
+                        "constant references unknown string id",
+                        format!(
+                            "string_id={} is out of range (string_pool_len={})",
+                            id.value(),
+                            self.module.string_pool.len()
+                        ),
+                    ));
+                }
+            }
+            ConstValue::Symbol(id) => {
+                if self.module.symbol_pool.get(id.value() as usize).is_none() {
+                    return Err(IrError::invariant_violation(
+                        None,
+                        "constant references unknown symbol id",
+                        format!(
+                            "symbol_id={} is out of range (symbol_pool_len={})",
+                            id.value(),
+                            self.module.symbol_pool.len()
+                        ),
+                    ));
+                }
+            }
+            ConstValue::Integer(_) => {}
+        }
+
+        Ok(())
+    }
+
+    fn next_u32_id(current_len: usize, pool_name: &str) -> Result<u32, IrError> {
+        u32::try_from(current_len).map_err(|_| {
+            IrError::limit_exceeded(
+                None,
+                "pool id overflow",
+                format!("{pool_name} length {current_len} exceeds u32::MAX"),
+            )
+        })
     }
 }

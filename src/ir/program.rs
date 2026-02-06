@@ -524,6 +524,39 @@ impl IrModuleBuilder {
         Ok(id)
     }
 
+    /// Replaces a previously registered code object with a finalized version.
+    pub fn replace_code_object(
+        &mut self,
+        id: CodeObjectId,
+        mut code_object: CodeObject,
+    ) -> Result<(), IrError> {
+        let index = id.value() as usize;
+        let len = self.module.code_objects.len();
+        let slot = self.module.code_objects.get_mut(index).ok_or_else(|| {
+            IrError::invariant_violation(
+                None,
+                "cannot replace nonexistent code object",
+                format!(
+                    "code_object_id={} is out of range (code_objects_len={})",
+                    id.value(),
+                    len
+                ),
+            )
+        })?;
+
+        // Update instruction count tracking.
+        let old_count = slot.instructions.len();
+        let new_count = code_object.instructions.len();
+        self.total_instructions = self
+            .total_instructions
+            .saturating_sub(old_count)
+            .saturating_add(new_count);
+
+        code_object.id = id;
+        *slot = code_object;
+        Ok(())
+    }
+
     /// Adds one word program and returns its assigned stable id.
     pub fn add_word_program(&mut self, mut program: WordProgram) -> Result<WordProgramId, IrError> {
         if program.ops.len() > self.options.max_word_program_ops {

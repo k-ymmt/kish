@@ -1,5 +1,6 @@
 //! Parser AST to IR lowering entrypoints.
 
+pub(crate) mod emit;
 pub(crate) mod from_parser;
 
 pub mod arith_program;

@@ -12,6 +12,7 @@ use crate::parser::ast::{
 };
 
 use super::compound::lower_compound_command_node;
+use super::emit;
 use super::function::lower_function_definition;
 use super::simple_command::lower_simple_command;
 
@@ -24,8 +25,11 @@ pub(crate) fn lower_complete_command_entry(
     context: &mut LoweringContext,
     command: &CompleteCommandAst,
 ) -> Result<IrModule, IrError> {
-    let _hir = lower_complete_command_to_hir(context, command)?;
-    Ok(context.module_builder().finish())
+    let hir = lower_complete_command_to_hir(context, command)?;
+    let mut module_builder = context.module_builder();
+    let mut emit_ctx = emit::EmitContext::new(&mut module_builder);
+    emit::emit_complete_command(&mut emit_ctx, &hir)?;
+    Ok(module_builder.finish())
 }
 
 /// Lowers a whole program to an IrModule (existing public API).
@@ -33,8 +37,11 @@ pub(crate) fn lower_program_entry(
     context: &mut LoweringContext,
     program: &ProgramAst,
 ) -> Result<IrModule, IrError> {
-    let _hir = lower_program_to_hir(context, program)?;
-    Ok(context.module_builder().finish())
+    let hir = lower_program_to_hir(context, program)?;
+    let mut module_builder = context.module_builder();
+    let mut emit_ctx = emit::EmitContext::new(&mut module_builder);
+    emit::emit_program(&mut emit_ctx, &hir)?;
+    Ok(module_builder.finish())
 }
 
 /// Lowers a single complete command AST to HIR.

@@ -48,7 +48,7 @@ fn lower_complete_command_succeeds() {
         .lower_complete_command(&command)
         .expect("lowering should succeed");
 
-    assert!(module.code_objects.is_empty());
+    assert!(!module.code_objects.is_empty());
 }
 
 #[test]
@@ -63,7 +63,7 @@ fn lower_program_succeeds() {
         .lower_program(&program)
         .expect("lowering should succeed");
 
-    assert!(module.code_objects.is_empty());
+    assert!(!module.code_objects.is_empty());
 }
 
 #[test]

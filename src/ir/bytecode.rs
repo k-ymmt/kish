@@ -65,6 +65,32 @@ pub enum Instruction {
     EndSimple,
     /// Executes assembled simple command.
     ExecSimple,
+    /// Negates top-of-stack exit status (0 -> 1, nonzero -> 0).
+    NegateStatus,
+    /// Forks a subshell, executes code object, pushes exit status.
+    ExecSubshell(CodeObjectId),
+    /// Registers a function definition, pushes 0.
+    DefineFunction { name: SymbolId, body: CodeObjectId },
+    /// Executes code object in background, pushes 0.
+    ExecBackground(CodeObjectId),
+    /// Begins pipeline assembly with N stages.
+    BeginPipeline(u32),
+    /// Adds one pipeline stage.
+    AddPipelineStage(CodeObjectId),
+    /// Executes assembled pipeline, pushes exit status of last stage.
+    ExecPipeline,
+    /// Sets up for-loop: stores var name, expects word_count ForAddWord instructions.
+    ForSetup { var: SymbolId, word_count: u32 },
+    /// Adds one word expansion program to for-loop iteration list.
+    ForAddWord(WordProgramId),
+    /// Advances for-loop iterator. Pushes 1 (value available, var set) or 0 (done).
+    ForNext,
+    /// Pops top-of-stack and stores as case subject.
+    CaseSetSubject,
+    /// Tests pattern against stored case subject. Pushes 1 (match) or 0 (no match).
+    CaseTestPattern(WordProgramId),
+    /// Clears stored case subject.
+    CaseClear,
 }
 
 /// Word-expansion subprogram operation.

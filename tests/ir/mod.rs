@@ -4,6 +4,7 @@ mod code_object_builder_negative;
 mod code_object_builder_positive;
 mod contracts;
 mod emit_control_flow;
+mod encode;
 mod hir_builder_negative;
 mod hir_builder_positive;
 mod hir_contracts;

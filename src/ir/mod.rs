@@ -14,9 +14,13 @@ pub mod verify;
 
 pub use bytecode::{
     ArithCompoundOp, ArithProgramOp, BranchTarget, CommandDispatchHint, EncodedCodeObject,
-    EncodedModule, Instruction, OpenMode, RedirectProgramOp, WordProgramOp,
+    EncodedModule, Instruction, OpenMode, RedirectProgramOp, SourceMapEntry, WordProgramOp,
 };
-pub use encode::encode_module;
+pub use encode::{
+    DecodedInstruction, decode_arith_program_words, decode_code_object_words,
+    decode_redirect_program_words, decode_word_program_words, encode_arith_program,
+    encode_code_object, encode_module, encode_redirect_program, encode_word_program,
+};
 pub use error::{IrError, IrErrorKind};
 pub use hir::{
     HirAndOr, HirAndOrConnector, HirAssignment, HirCaseClause, HirCaseItem, HirCaseTerminator,

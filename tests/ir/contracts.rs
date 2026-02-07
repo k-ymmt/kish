@@ -71,8 +71,11 @@ fn lower_program_succeeds() {
 fn encode_and_verify_public_contracts_exist() {
     let module = IrModule::default();
 
-    let encode_error = encode_module(&module).expect_err("Phase 0 encoder should be stubbed");
-    assert_eq!(encode_error.kind, IrErrorKind::UnsupportedForm);
+    let encoded = encode_module(&module).expect("empty module should encode successfully");
+    assert!(encoded.code_objects.is_empty());
+    assert!(encoded.word_programs.is_empty());
+    assert!(encoded.redirect_programs.is_empty());
+    assert!(encoded.arith_programs.is_empty());
 
     let verify_error = verify_module(&module).expect_err("Phase 0 verifier should be stubbed");
     assert_eq!(verify_error.kind, IrErrorKind::UnsupportedForm);

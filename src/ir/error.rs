@@ -145,6 +145,20 @@ impl IrError {
         )
     }
 
+    /// Creates an `EncodingOverflow` error.
+    pub fn encoding_overflow(
+        span: Option<Span>,
+        message: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            IrErrorKind::EncodingOverflow,
+            span,
+            message,
+            Some(detail.into()),
+        )
+    }
+
     /// Creates an invariant violation for branch-target shape errors.
     pub fn invalid_branch_target(
         span: Option<Span>,

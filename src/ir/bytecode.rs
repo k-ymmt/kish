@@ -300,6 +300,17 @@ pub enum ArithCompoundOp {
     BitwiseXor,
 }
 
+/// Source-map entry mapping encoded word offsets to source spans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct SourceMapEntry {
+    /// Byte offset into the encoded word stream.
+    pub word_offset: u32,
+    /// Source byte-offset start.
+    pub source_start: u32,
+    /// Source byte-offset end.
+    pub source_end: u32,
+}
+
 /// Encoded code object blob.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EncodedCodeObject {
@@ -307,6 +318,8 @@ pub struct EncodedCodeObject {
     pub id: CodeObjectId,
     /// Packed instruction words.
     pub words: Vec<u32>,
+    /// Source-map entries (empty until span tracking is wired).
+    pub source_map: Vec<SourceMapEntry>,
 }
 
 /// Packed bytecode module produced by encode pass.

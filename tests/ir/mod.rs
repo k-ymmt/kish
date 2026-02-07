@@ -13,4 +13,5 @@ mod lower_from_parser;
 mod pooling_interning;
 mod redirect_program_lowering;
 mod vm_ir_contracts;
+mod verify;
 mod word_program_lowering;

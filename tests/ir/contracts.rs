@@ -1,6 +1,6 @@
 use kish::ir::{
-    BranchTarget, CodeObjectBuilder, CodeObjectId, IrErrorKind, IrModule, IrOptions,
-    LoweringContext, encode_module, verify_module,
+    BranchTarget, CodeObjectBuilder, CodeObjectId, IrModule, IrOptions, LoweringContext,
+    encode_module, verify_module,
 };
 use kish::lexer::{Lexer, LexerMode, SourceId};
 use kish::parser::{ParseOptions, ParseStep, Parser, TokenStream};
@@ -77,8 +77,7 @@ fn encode_and_verify_public_contracts_exist() {
     assert!(encoded.redirect_programs.is_empty());
     assert!(encoded.arith_programs.is_empty());
 
-    let verify_error = verify_module(&module).expect_err("Phase 0 verifier should be stubbed");
-    assert_eq!(verify_error.kind, IrErrorKind::UnsupportedForm);
+    verify_module(&module).expect("empty module should verify successfully");
 }
 
 #[test]

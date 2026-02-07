@@ -39,4 +39,4 @@ pub use program::{
     ArithProgram, CodeObject, CodeObjectBuilder, ConstValue, IrModule, IrModuleBuilder, IrOptions,
     RedirectProgram, WordProgram,
 };
-pub use verify::verify_module;
+pub use verify::{VerifyWarning, VerifyWarningKind, verify_module, verify_module_debug};

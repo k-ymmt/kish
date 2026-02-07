@@ -11,4 +11,5 @@ pub mod value;
 pub mod word_vm;
 
 pub use error::{VmError, VmErrorKind};
+pub use frame::{CaseState, ForLoopState, Frame, PipelineBuilder};
 pub use value::Value;

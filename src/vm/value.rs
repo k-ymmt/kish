@@ -86,6 +86,28 @@ impl Value {
         }
     }
 
+    /// Tests raw zeroness of the value.
+    ///
+    /// This is distinct from `is_truthy()`: `ExitStatus(0)` is both truthy
+    /// (POSIX success) AND zero. `is_zero()` checks raw numeric zeroness,
+    /// while `is_truthy()` uses POSIX semantics.
+    ///
+    /// - `Integer(0)` → true
+    /// - `ExitStatus(0)` → true
+    /// - `String("")` → true
+    /// - `FieldList([])` → true
+    /// - `Uninitialized` → true
+    /// - All others → false
+    pub fn is_zero(&self) -> bool {
+        match self {
+            Self::Integer(n) => *n == 0,
+            Self::ExitStatus(n) => *n == 0,
+            Self::String(s) => s.is_empty(),
+            Self::FieldList(fields) => fields.is_empty(),
+            Self::Uninitialized => true,
+        }
+    }
+
     /// Tests truthiness using POSIX conventions.
     ///
     /// - `ExitStatus(0)` -> true (success).

@@ -12,4 +12,5 @@ pub mod word_vm;
 
 pub use error::{VmError, VmErrorKind};
 pub use frame::{CaseState, ForLoopState, Frame, PipelineBuilder};
+pub use machine::{ShellState, VmMachine};
 pub use value::Value;

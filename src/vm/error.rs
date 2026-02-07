@@ -41,6 +41,8 @@ pub enum VmErrorKind {
     ExpansionError,
     /// Filename pattern compilation or matching error.
     PatternError,
+    /// Call depth exceeded the configured limit.
+    CallDepthExceeded,
     /// Unexpected internal VM state; indicates a VM bug.
     InternalError,
 }
@@ -66,6 +68,7 @@ impl fmt::Display for VmErrorKind {
             Self::SignalError => write!(f, "signal error"),
             Self::ExpansionError => write!(f, "expansion error"),
             Self::PatternError => write!(f, "pattern error"),
+            Self::CallDepthExceeded => write!(f, "call depth exceeded"),
             Self::InternalError => write!(f, "internal error"),
         }
     }
@@ -137,6 +140,19 @@ impl VmError {
         let name = name.into();
         let message = format!("{name}: permission denied");
         Self::new(VmErrorKind::CommandNotExecutable(name), message)
+    }
+
+    /// Creates an `InvalidInstruction` error.
+    pub fn invalid_instruction(message: impl Into<String>) -> Self {
+        Self::new(VmErrorKind::InvalidInstruction, message)
+    }
+
+    /// Creates a `CallDepthExceeded` error.
+    pub fn call_depth_exceeded(depth: usize, limit: usize) -> Self {
+        Self::new(
+            VmErrorKind::CallDepthExceeded,
+            format!("call depth {depth} exceeds limit {limit}"),
+        )
     }
 
     /// Creates an `InternalError` error.

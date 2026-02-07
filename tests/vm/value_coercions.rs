@@ -312,6 +312,66 @@ fn is_truthy_uninitialized() {
 }
 
 // ---------------------------------------------------------------------------
+// is_zero
+// ---------------------------------------------------------------------------
+
+#[test]
+fn is_zero_integer_zero() {
+    assert!(Value::Integer(0).is_zero());
+}
+
+#[test]
+fn is_zero_integer_nonzero() {
+    assert!(!Value::Integer(1).is_zero());
+}
+
+#[test]
+fn is_zero_integer_negative() {
+    assert!(!Value::Integer(-1).is_zero());
+}
+
+#[test]
+fn is_zero_exit_status_zero() {
+    assert!(Value::ExitStatus(0).is_zero());
+}
+
+#[test]
+fn is_zero_exit_status_nonzero() {
+    assert!(!Value::ExitStatus(1).is_zero());
+}
+
+#[test]
+fn is_zero_string_empty() {
+    assert!(Value::String(String::new()).is_zero());
+}
+
+#[test]
+fn is_zero_string_nonempty() {
+    assert!(!Value::String("hello".into()).is_zero());
+}
+
+#[test]
+fn is_zero_string_zero_char() {
+    // "0" is a non-empty string, so is_zero returns false.
+    assert!(!Value::String("0".into()).is_zero());
+}
+
+#[test]
+fn is_zero_field_list_empty() {
+    assert!(Value::FieldList(vec![]).is_zero());
+}
+
+#[test]
+fn is_zero_field_list_nonempty() {
+    assert!(!Value::FieldList(vec!["a".into()]).is_zero());
+}
+
+#[test]
+fn is_zero_uninitialized() {
+    assert!(Value::Uninitialized.is_zero());
+}
+
+// ---------------------------------------------------------------------------
 // Default
 // ---------------------------------------------------------------------------
 

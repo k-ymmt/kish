@@ -33,36 +33,47 @@ src/
 │   ├── arena.rs         # Node arena for AST allocation
 │   ├── recovery.rs      # Error recovery strategies
 │   └── error.rs         # Parse error types
-└── ir/                  # Intermediate representation (Phase 4-8)
-    ├── hir.rs           # High-level IR types (HirProgram, HirSimpleCommand, etc.)
-    ├── hir_builder.rs   # HIR construction helpers
-    ├── bytecode.rs      # VM instruction set, CommandDispatchHint
-    ├── ids.rs           # Typed ID newtypes (CodeObjectId, SymbolId, etc.)
-    ├── program.rs       # CodeObject, IrModule, IrModuleBuilder, pool interning
-    ├── error.rs         # IR error types
-    ├── encode.rs        # IR-to-bytecode encoding (stub)
-    ├── verify.rs        # IR verification pass (stub)
-    └── lower/           # Lowering passes
-        ├── from_parser.rs      # Parser AST -> HIR (Phase 4)
-        ├── emit.rs             # HIR -> VM IR emission (Phase 5-6)
-        ├── simple_command.rs   # Simple command lowering helpers
-        ├── compound.rs         # Compound command lowering helpers
-        ├── control_flow.rs     # Control flow lowering helpers
-        ├── function.rs         # Function definition lowering
-        ├── word_program.rs     # Word expansion subprogram lowering (stub)
-        ├── redirect_program.rs # Redirect subprogram lowering (stub)
-        └── arith_program.rs    # Arithmetic subprogram lowering (stub)
+├── ir/                  # Intermediate representation (Phase 4-8)
+│   ├── hir.rs           # High-level IR types (HirProgram, HirSimpleCommand, etc.)
+│   ├── hir_builder.rs   # HIR construction helpers
+│   ├── bytecode.rs      # VM instruction set, CommandDispatchHint
+│   ├── ids.rs           # Typed ID newtypes (CodeObjectId, SymbolId, etc.)
+│   ├── program.rs       # CodeObject, IrModule, IrModuleBuilder, pool interning
+│   ├── error.rs         # IR error types
+│   ├── encode.rs        # IR-to-bytecode encoding (stub)
+│   ├── verify.rs        # IR verification pass (stub)
+│   └── lower/           # Lowering passes
+│       ├── from_parser.rs      # Parser AST -> HIR (Phase 4)
+│       ├── emit.rs             # HIR -> VM IR emission (Phase 5-6)
+│       ├── simple_command.rs   # Simple command lowering helpers
+│       ├── compound.rs         # Compound command lowering helpers
+│       ├── control_flow.rs     # Control flow lowering helpers
+│       ├── function.rs         # Function definition lowering
+│       ├── word_program.rs     # Word expansion subprogram lowering (stub)
+│       ├── redirect_program.rs # Redirect subprogram lowering (stub)
+│       └── arith_program.rs    # Arithmetic subprogram lowering (stub)
+└── vm/                  # Virtual machine runtime
+    ├── value.rs         # Value enum with POSIX-compliant coercions
+    ├── error.rs         # VmError, VmErrorKind
+    ├── machine.rs       # Top-level VM interpreter (stub)
+    ├── frame.rs         # VM call-frame (stub)
+    ├── word_vm.rs       # Word-expansion sub-VM (stub)
+    ├── redir_vm.rs      # Redirect sub-VM (stub)
+    ├── arith_vm.rs      # Arithmetic sub-VM (stub)
+    ├── command.rs       # Command builder (stub)
+    └── pattern.rs       # Filename pattern matching (stub)
 
 tests/
 ├── lexer/       # Lexer tests
 ├── parser/      # Parser tests
 ├── ir/          # IR and lowering tests
+├── vm/          # VM and value system tests
 └── fixtures/    # Test input files
 ```
 
 ## Pipeline
 
-Source text → Lexer (tokens) → Parser (AST) → HIR lowering (Phase 4) → VM IR emission (Phase 5-6) → Encode (Phase 9, stub) → VM execution (future).
+Source text → Lexer (tokens) → Parser (AST) → HIR lowering (Phase 4) → VM IR emission (Phase 5-6) → Encode (Phase 9, stub) → VM execution (Phase 0 scaffolding done).
 
 ## Commands
 

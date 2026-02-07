@@ -258,6 +258,12 @@ fn lowering_context_can_create_module_builder_with_same_options() {
         max_redirect_ops: 14,
         max_arith_program_ops: 16,
         max_arity: 15,
+        max_strings: 17,
+        max_symbols: 18,
+        max_word_programs: 19,
+        max_redirect_programs: 20,
+        max_arith_programs: 21,
+        max_nesting_depth: 22,
     };
     let context = LoweringContext::new(options);
     let builder = context.module_builder();

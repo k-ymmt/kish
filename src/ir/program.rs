@@ -28,6 +28,18 @@ pub struct IrOptions {
     pub max_arith_program_ops: usize,
     /// Maximum command arity accepted during lowering.
     pub max_arity: usize,
+    /// Maximum entries in the string pool.
+    pub max_strings: usize,
+    /// Maximum entries in the symbol pool.
+    pub max_symbols: usize,
+    /// Maximum total word subprogram count.
+    pub max_word_programs: usize,
+    /// Maximum total redirect subprogram count.
+    pub max_redirect_programs: usize,
+    /// Maximum total arithmetic subprogram count.
+    pub max_arith_programs: usize,
+    /// Maximum nesting depth for compound commands.
+    pub max_nesting_depth: usize,
 }
 
 impl Default for IrOptions {
@@ -40,6 +52,12 @@ impl Default for IrOptions {
             max_redirect_ops: 2_000,
             max_arith_program_ops: 10_000,
             max_arity: 8_192,
+            max_strings: 100_000,
+            max_symbols: 100_000,
+            max_word_programs: 100_000,
+            max_redirect_programs: 50_000,
+            max_arith_programs: 50_000,
+            max_nesting_depth: 256,
         }
     }
 }
@@ -404,6 +422,18 @@ impl IrModuleBuilder {
             return Ok(id);
         }
 
+        if self.module.string_pool.len() >= self.options.max_strings {
+            return Err(IrError::limit_exceeded(
+                None,
+                "string pool limit exceeded",
+                format!(
+                    "max_strings={}, attempted_count={}",
+                    self.options.max_strings,
+                    self.module.string_pool.len().saturating_add(1)
+                ),
+            ));
+        }
+
         let id = StringId::new(Self::next_u32_id(
             self.module.string_pool.len(),
             "string_pool",
@@ -418,6 +448,18 @@ impl IrModuleBuilder {
         let value = value.into();
         if let Some(id) = self.symbol_interner.get(value.as_str()).copied() {
             return Ok(id);
+        }
+
+        if self.module.symbol_pool.len() >= self.options.max_symbols {
+            return Err(IrError::limit_exceeded(
+                None,
+                "symbol pool limit exceeded",
+                format!(
+                    "max_symbols={}, attempted_count={}",
+                    self.options.max_symbols,
+                    self.module.symbol_pool.len().saturating_add(1)
+                ),
+            ));
         }
 
         let id = SymbolId::new(Self::next_u32_id(
@@ -562,6 +604,18 @@ impl IrModuleBuilder {
 
     /// Adds one word program and returns its assigned stable id.
     pub fn add_word_program(&mut self, mut program: WordProgram) -> Result<WordProgramId, IrError> {
+        if self.module.word_programs.len() >= self.options.max_word_programs {
+            return Err(IrError::limit_exceeded(
+                None,
+                "word program count limit exceeded",
+                format!(
+                    "max_word_programs={}, attempted_count={}",
+                    self.options.max_word_programs,
+                    self.module.word_programs.len().saturating_add(1)
+                ),
+            ));
+        }
+
         if program.ops.len() > self.options.max_word_program_ops {
             return Err(IrError::limit_exceeded(
                 None,
@@ -588,6 +642,18 @@ impl IrModuleBuilder {
         &mut self,
         mut program: RedirectProgram,
     ) -> Result<RedirectProgramId, IrError> {
+        if self.module.redirect_programs.len() >= self.options.max_redirect_programs {
+            return Err(IrError::limit_exceeded(
+                None,
+                "redirect program count limit exceeded",
+                format!(
+                    "max_redirect_programs={}, attempted_count={}",
+                    self.options.max_redirect_programs,
+                    self.module.redirect_programs.len().saturating_add(1)
+                ),
+            ));
+        }
+
         if program.ops.len() > self.options.max_redirect_ops {
             return Err(IrError::limit_exceeded(
                 None,
@@ -614,6 +680,18 @@ impl IrModuleBuilder {
         &mut self,
         mut program: ArithProgram,
     ) -> Result<ArithProgramId, IrError> {
+        if self.module.arith_programs.len() >= self.options.max_arith_programs {
+            return Err(IrError::limit_exceeded(
+                None,
+                "arith program count limit exceeded",
+                format!(
+                    "max_arith_programs={}, attempted_count={}",
+                    self.options.max_arith_programs,
+                    self.module.arith_programs.len().saturating_add(1)
+                ),
+            ));
+        }
+
         if program.ops.len() > self.options.max_arith_program_ops {
             return Err(IrError::limit_exceeded(
                 None,

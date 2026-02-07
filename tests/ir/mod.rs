@@ -16,6 +16,8 @@ mod pipeline_end_to_end;
 mod pooling_interning;
 mod property_ir;
 mod redirect_program_lowering;
+mod scaling;
+mod stress;
 mod vm_ir_contracts;
 mod verify;
 mod word_program_lowering;

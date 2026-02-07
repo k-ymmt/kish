@@ -25,17 +25,45 @@ use crate::ir::program::{CodeObjectBuilder, IrModuleBuilder};
 /// Stateful context for HIR -> VM IR emission.
 pub(crate) struct EmitContext<'a> {
     module: &'a mut IrModuleBuilder,
+    nesting_depth: usize,
+    max_nesting_depth: usize,
 }
 
 impl<'a> EmitContext<'a> {
     /// Creates a new emission context.
     pub(crate) fn new(module: &'a mut IrModuleBuilder) -> Self {
-        Self { module }
+        let max_nesting_depth = module.options().max_nesting_depth;
+        Self {
+            module,
+            nesting_depth: 0,
+            max_nesting_depth,
+        }
     }
 
     /// Returns a mutable reference to the module builder.
     pub(crate) fn module(&mut self) -> &mut IrModuleBuilder {
         self.module
+    }
+
+    /// Increases nesting depth by one, returning an error if the limit is exceeded.
+    pub(crate) fn enter_nesting(&mut self) -> Result<(), IrError> {
+        self.nesting_depth = self.nesting_depth.saturating_add(1);
+        if self.nesting_depth > self.max_nesting_depth {
+            return Err(IrError::limit_exceeded(
+                None,
+                "compound command nesting depth limit exceeded",
+                format!(
+                    "max_nesting_depth={}, attempted_depth={}",
+                    self.max_nesting_depth, self.nesting_depth
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Decreases nesting depth by one.
+    pub(crate) fn exit_nesting(&mut self) {
+        self.nesting_depth = self.nesting_depth.saturating_sub(1);
     }
 }
 
@@ -254,31 +282,24 @@ fn emit_compound_command(
     ctx: &mut EmitContext<'_>,
     compound: &HirCompoundCommand,
 ) -> Result<(), IrError> {
-    match compound {
-        HirCompoundCommand::BraceGroup(list) => {
-            emit_list(builder, ctx, list)?;
-        }
+    ctx.enter_nesting()?;
+
+    let result = match compound {
+        HirCompoundCommand::BraceGroup(list) => emit_list(builder, ctx, list),
         HirCompoundCommand::Subshell(list) => {
             let co_id = compile_list_as_code_object(ctx, list)?;
             builder.emit(Instruction::ExecSubshell(co_id))?;
+            Ok(())
         }
-        HirCompoundCommand::If(clause) => {
-            emit_if(builder, ctx, clause)?;
-        }
-        HirCompoundCommand::While(clause) => {
-            emit_while(builder, ctx, clause)?;
-        }
-        HirCompoundCommand::Until(clause) => {
-            emit_until(builder, ctx, clause)?;
-        }
-        HirCompoundCommand::For(clause) => {
-            emit_for(builder, ctx, clause)?;
-        }
-        HirCompoundCommand::Case(clause) => {
-            emit_case(builder, ctx, clause)?;
-        }
-    }
-    Ok(())
+        HirCompoundCommand::If(clause) => emit_if(builder, ctx, clause),
+        HirCompoundCommand::While(clause) => emit_while(builder, ctx, clause),
+        HirCompoundCommand::Until(clause) => emit_until(builder, ctx, clause),
+        HirCompoundCommand::For(clause) => emit_for(builder, ctx, clause),
+        HirCompoundCommand::Case(clause) => emit_case(builder, ctx, clause),
+    };
+
+    ctx.exit_nesting();
+    result
 }
 
 // ---------------------------------------------------------------------------
